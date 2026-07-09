@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ClassMood AI - ระบบตรวจสอบห้องแล็บอัจฉริยะ</title>
+    <title>ClassMood AI - ระบบวิเคราะห์พฤติกรรมในชั้นเรียน</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -31,7 +31,7 @@
 
             <div>
               <h1 class="text-2xl font-bold">ClassMood AI</h1>
-              <p class="text-blue-100 text-sm">ระบบตรวจสอบห้องแล็บอัจฉริยะ</p>
+              <p class="text-blue-100 text-sm">ระบบวิเคราะห์พฤติกรรมในชั้นเรียน</p>
             </div>
           </div>
           <div class="flex items-center space-x-4">
@@ -49,113 +49,71 @@
 
     <!-- Main Content -->
     <div class="container mx-auto px-6 py-8">
-      <!-- Lab Selection Menu -->
+      <!-- Session Start Menu -->
       <div id="labMenu" class="space-y-6">
         <div class="text-center mb-8">
           <h2 class="text-3xl font-bold text-gray-800 mb-2">
-            เลือกห้องแล็บที่ต้องการตรวจสอบ
+            เริ่มรอบวิเคราะห์
           </h2>
-          <p class="text-gray-600">คลิกเพื่อเข้าสู่ระบบตรวจสอบแบบ Real-Time</p>
+          <p class="text-gray-600">ใช้ได้ทั้งเว็บแคมและคลิปวิดีโอ</p>
         </div>
 
-        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-          <!-- Lab 9226 -->
-          <div
-            class="bg-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 cursor-pointer transform hover:scale-105"
-            onclick="enterLab('9226', 'ห้องแล็บ 9226')"
-          >
-            <div class="p-6">
-              <div class="flex items-center justify-between mb-4">
-                <h3 class="text-xl font-semibold text-gray-800">
-                  ห้องแล็บ 9226
-                </h3>
-                <div
-                  class="w-3 h-3 bg-green-500 rounded-full status-indicator"
-                ></div>
-              </div>
-              <div class="space-y-2 text-sm text-gray-600">
-                <p>กล้อง: 2 ตัว</p>
-                <p>
-                  นักศึกษา:
-                  <span id="ov-9226-people" class="font-medium text-blue-600"
-                    >-</span
-                  >
-                  คน
-                </p>
-                <p>
-                  ความตั้งใจ:
-                  <span
-                    id="ov-9226-attention"
-                    class="font-medium text-green-600"
-                    >-%</span
-                  >
-                </p>
-                <p>
-                  อัปเดต:
-                  <span id="ov-9226-time" class="text-gray-400">--:--</span>
-                </p>
-              </div>
+        <div class="max-w-2xl mx-auto bg-white rounded-xl shadow-lg p-6">
+          <div class="space-y-5">
+            <div>
+              <label
+                for="sessionNameInput"
+                class="block text-sm font-medium text-gray-700 mb-2"
+                >ชื่อรอบ</label
+              >
+              <input
+                id="sessionNameInput"
+                type="text"
+                maxlength="80"
+                placeholder="เช่น คลิปทดลองช่วงเช้า"
+                class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-400"
+              />
             </div>
-          </div>
 
-          <!-- Lab 9227 -->
-          <div
-            class="bg-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 cursor-pointer transform hover:scale-105"
-            onclick="enterLab('9227', 'ห้องแล็บ 9227')"
-          >
-            <div class="p-6">
-              <div class="flex items-center justify-between mb-4">
-                <h3 class="text-xl font-semibold text-gray-800">
-                  ห้องแล็บ 9227
-                </h3>
-                <div
-                  class="w-3 h-3 bg-yellow-500 rounded-full status-indicator"
-                ></div>
+            <div class="grid md:grid-cols-2 gap-3">
+              <div class="border border-blue-100 bg-blue-50 rounded-lg p-4">
+                <p class="font-semibold text-blue-800">เว็บแคม</p>
+                <p class="text-sm text-blue-700 mt-1">วิเคราะห์จากกล้องที่ต่อกับเครื่อง</p>
               </div>
-              <div class="space-y-2 text-sm text-gray-600">
-                <p>กล้อง: 2 ตัว</p>
-                <p>
-                  นักศึกษา:
-                  <span id="ov-9227-people" class="font-medium text-blue-600"
-                    >-</span
-                  >
-                  คน
-                </p>
-                <p>
-                  ความตั้งใจ:
-                  <span
-                    id="ov-9227-attention"
-                    class="font-medium text-green-600"
-                    >-%</span
-                  >
-                </p>
-                <p>
-                  อัปเดต:
-                  <span id="ov-9227-time" class="text-gray-400">--:--</span>
-                </p>
+              <div class="border border-purple-100 bg-purple-50 rounded-lg p-4">
+                <p class="font-semibold text-purple-800">คลิปวิดีโอ</p>
+                <p class="text-sm text-purple-700 mt-1">อัปโหลดไฟล์ที่บันทึกจากโทรศัพท์หรือกล้อง</p>
               </div>
             </div>
+
+            <button
+              id="startSessionBtn"
+              onclick="startSession()"
+              class="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg transition-colors font-medium"
+            >
+              เริ่มวิเคราะห์
+            </button>
           </div>
         </div>
       </div>
 
-      <!-- Lab Monitoring Interface -->
+      <!-- Analysis Interface -->
       <div id="labInterface" class="hidden space-y-6">
-        <!-- Back Button and Lab Info -->
+        <!-- Back Button and Session Info -->
         <div class="flex items-center justify-between">
           <button
             onclick="backToMenu()"
             class="flex items-center space-x-2 bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors"
           >
             <span>←</span>
-            <span>กลับสู่เมนูหลัก</span>
+            <span>เริ่มรอบใหม่</span>
           </button>
           <div class="text-right">
             <h2
               id="currentLabName"
               class="text-2xl font-bold text-gray-800"
             ></h2>
-            <p class="text-gray-600">การตรวจสอบแบบ Real-Time</p>
+            <p class="text-gray-600">การวิเคราะห์แบบ Real-Time</p>
           </div>
         </div>
 
@@ -179,8 +137,8 @@
             <div class="flex items-center space-x-4">
               <div class="text-sm">
                 <span class="text-gray-600">สถานะ:</span>
-                <span id="connectionStatus" class="text-green-600 font-medium"
-                  >เชื่อมต่อแล้ว</span
+                <span id="connectionStatus" class="text-gray-500 font-medium"
+                  >รอแหล่งภาพ</span
                 >
               </div>
               <div class="text-sm">
@@ -218,29 +176,22 @@
 
               <!-- Video File -->
               <input
-                type="text"
-                id="videoPathInput"
-                placeholder="path\to\video.mp4"
-                class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-400 w-52"
+                type="file"
+                id="videoFileInput"
+                accept="video/mp4,video/avi,video/quicktime,video/x-matroska,video/webm,.mp4,.avi,.mov,.mkv,.webm"
+                class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-400 w-64 bg-white"
               />
               <button
+                id="uploadVideoBtn"
                 onclick="connectVideoFile()"
                 class="bg-purple-500 hover:bg-purple-600 text-white text-sm px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
               >
-                ไฟล์วิดีโอ
-              </button>
-
-              <!-- Disconnect -->
-              <button
-                onclick="disconnectSource()"
-                class="bg-gray-400 hover:bg-gray-500 text-white text-sm px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
-              >
-                รูปนิ่ง
+                อัปโหลดคลิป
               </button>
 
               <!-- Status -->
               <span id="sourceStatus" class="text-xs text-gray-500"
-                >&#9675; โหมด: รูปนิ่ง</span
+                >&#9675; รอเลือกเว็บแคมหรือคลิป</span
               >
             </div>
           </div>
@@ -252,24 +203,9 @@
           <div class="lg:col-span-2 space-y-4">
             <div class="bg-white rounded-xl shadow-lg p-6">
               <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-semibold text-gray-800">มุมมองกล้อง</h3>
-                <div class="flex items-center space-x-2">
-                  <button
-                    onclick="previousCamera()"
-                    class="bg-gray-200 hover:bg-gray-300 p-2 rounded-lg transition-colors"
-                  >
-                    ←
-                  </button>
-                  <span id="cameraInfo" class="text-sm text-gray-600"
-                    >กล้อง 1/2</span
-                  >
-                  <button
-                    onclick="nextCamera()"
-                    class="bg-gray-200 hover:bg-gray-300 p-2 rounded-lg transition-colors"
-                  >
-                    →
-                  </button>
-                </div>
+                <h3 class="text-lg font-semibold text-gray-800">
+                  แหล่งภาพวิเคราะห์
+                </h3>
               </div>
 
               <!-- Camera Display -->
@@ -278,14 +214,31 @@
               >
                 <img
                   id="liveFeed"
-                  src="http://127.0.0.1:5000/api/frame/9226/1"
                   alt="Live Feed"
-                  class="max-h-full max-w-full rounded-lg object-contain border border-gray-700 transition-all duration-500"
+                  class="hidden max-h-full max-w-full rounded-lg object-contain border border-gray-700 transition-all duration-500"
                 />
+                <div
+                  id="feedPlaceholder"
+                  class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center text-white px-6"
+                >
+                  <div
+                    class="w-14 h-14 rounded-full border border-white/30 flex items-center justify-center text-2xl"
+                  >
+                    ▶
+                  </div>
+                  <div>
+                    <div class="text-lg font-semibold">
+                      ยังไม่ได้เลือกแหล่งภาพ
+                    </div>
+                    <div class="text-sm text-gray-300 mt-1">
+                      เลือกเว็บแคมหรืออัปโหลดคลิปเพื่อเริ่มวิเคราะห์
+                    </div>
+                  </div>
+                </div>
                 <div
                   class="absolute top-4 left-4 bg-black bg-opacity-70 text-white px-3 py-1 rounded-lg text-sm"
                 >
-                  ห้องแล็บ 9226 - กล้อง <span id="camLabel">1</span>/2
+                  <span id="feedLabLabel">รอบวิเคราะห์</span> - แหล่งภาพหลัก
                 </div>
                 <div
                   class="absolute top-4 right-4 bg-blue-600 bg-opacity-90 text-white px-3 py-1 rounded text-sm"
@@ -411,7 +364,7 @@
         <div class="p-6">
           <div class="flex items-center justify-between mb-6">
             <h3 class="text-2xl font-bold text-gray-800">
-              รายงานการใช้งานห้องแล็บ
+              รายงานรอบวิเคราะห์
             </h3>
             <button
               onclick="closeReportModal()"

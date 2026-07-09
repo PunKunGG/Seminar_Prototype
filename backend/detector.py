@@ -16,7 +16,20 @@ if not os.path.exists(image_path):
     sys.exit(1)
 
 # โหลดโมเดล YOLO (เฉพาะคน)
-model = YOLO("yolov8n.pt")
+base_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(base_dir, os.pardir))
+model_path = next(
+    (
+        path
+        for path in (
+            os.path.join(base_dir, "yolov8n.pt"),
+            os.path.join(project_root, "yolov8n.pt"),
+        )
+        if os.path.exists(path)
+    ),
+    "yolov8n.pt",
+)
+model = YOLO(model_path)
 model.classes = [0]  # class 0 = person
 
 # อ่านภาพและตรวจจับ

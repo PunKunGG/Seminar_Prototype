@@ -1,19 +1,77 @@
 let currentCamera = 1;
-let totalCameras = 2;
 let currentLab = "";
+let currentSessionName = "";
 let useBehaviorMode = true; // ✅ เปิดโหมดวิเคราะห์พฤติกรรมเป็นค่าเริ่มต้น
 let liveFeedInterval = null;
 let lastAlertId = 0; // ID สุดท้ายที่ได้รับเพื่อหลีกเอา alert ซ้ำ
 let alertPollInterval = null; // setInterval handle สำหรับดึง alerts
 let latestExportData = null; // เก็บข้อมูลล่าสุดสำหรับ export
+let sourceStatusInterval = null;
+let currentSourceType = null;
+let autoReportShown = false;
+let streamReloadToken = 0;
+const API_BASE =
+  window.location.protocol === "file:" ? "http://127.0.0.1:5000" : window.location.origin;
 
-// 🎥 ติดตามว่ากล้องไหนมี live source กำลัง stream อยู่ (key: "labId/camId")
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
+
+function setTextIfPresent(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function setConnectionStatus(text, colorClass = "text-gray-500") {
+  const el = document.getElementById("connectionStatus");
+  if (!el) return;
+  el.textContent = text;
+  el.className = `${colorClass} font-medium`;
+}
+
+async function readResponsePayload(res) {
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) return res.json();
+  const text = await res.text();
+  return { error: text || res.statusText };
+}
+
+// 🎥 ติดตามว่าแหล่งภาพหลักของแต่ละรอบกำลัง stream อยู่หรือไม่ (key: "sessionId/sourceId")
 const activeSources = new Set();
 function _srcKey(labId, camId) {
   return `${labId}/${camId}`;
 }
 function isStreamActive(labId, camId) {
   return activeSources.has(_srcKey(labId, camId));
+}
+
+function showFeedPlaceholder() {
+  const feed = document.getElementById("liveFeed");
+  const placeholder = document.getElementById("feedPlaceholder");
+  const detectionCount = document.getElementById("detectionCount");
+
+  if (feed) {
+    feed.removeAttribute("src");
+    feed.classList.add("hidden");
+  }
+  if (placeholder) placeholder.classList.remove("hidden");
+  if (detectionCount) detectionCount.textContent = "รอแหล่งภาพ";
+}
+
+function showActiveFeed(src) {
+  const feed = document.getElementById("liveFeed");
+  const placeholder = document.getElementById("feedPlaceholder");
+
+  if (placeholder) placeholder.classList.add("hidden");
+  if (feed) {
+    feed.classList.remove("hidden");
+    feed.removeAttribute("src");
+    feed.src = src;
+  }
+}
+
+function streamUrlFor(labId, camId) {
+  return apiUrl(`/api/stream/${labId}/${camId}?v=${streamReloadToken}`);
 }
 
 // 🎥 เริ่มโหลดภาพ + ดึงข้อมูลจาก Flask ทุก 2 วินาที
@@ -24,7 +82,6 @@ function startLiveFeed() {
   }
 
   const feed = document.getElementById("liveFeed");
-  const detectionCount = document.getElementById("detectionCount");
   if (!feed) return;
 
   // เรียกทันทีครั้งแรก
@@ -40,19 +97,14 @@ async function updateLiveFeed() {
   const detectionCount = document.getElementById("detectionCount");
   if (!feed || !currentLab) return;
 
-  // ถ้า stream mode — browser จัดการ image เอง ไม่ต้อง set src
   if (!isStreamActive(currentLab, currentCamera)) {
-    const frameUrl = useBehaviorMode
-      ? `http://127.0.0.1:5000/api/behavior-frame/${currentLab}/${currentCamera}?t=${Date.now()}`
-      : `http://127.0.0.1:5000/api/frame/${currentLab}/${currentCamera}?t=${Date.now()}`;
-    feed.src = frameUrl;
+    showFeedPlaceholder();
+    return;
   }
 
   try {
     // ดึงข้อมูลการตรวจจับ
-    const dataRes = await fetch(
-      `http://127.0.0.1:5000/api/data/${currentLab}/${currentCamera}`,
-    );
+    const dataRes = await fetch(apiUrl(`/api/data/${currentLab}/${currentCamera}`));
     const data = await dataRes.json();
 
     if (!data || data.error) {
@@ -61,12 +113,10 @@ async function updateLiveFeed() {
     }
 
     // อัปเดตสถิติฝั่งขวา (จำนวนคน)
-    const peopleEl = document.querySelector(".text-blue-600");
-    const pcUsedEl = document.querySelector(
-      ".text-green-600:not(#attentionRate)",
-    );
-    const pcFreeEl = document.querySelector(".text-orange-600");
-    const usageEl = document.querySelector(".text-purple-600");
+    const peopleEl = document.getElementById("detectedPeopleCount");
+    const pcUsedEl = document.getElementById("pcUsedCount");
+    const pcFreeEl = document.getElementById("pcFreeCount");
+    const usageEl = document.getElementById("pcUsageRate");
 
     const total = 30;
     const used = Math.min(total, data.num_people);
@@ -80,9 +130,7 @@ async function updateLiveFeed() {
 
     // ถ้าเปิดโหมดวิเคราะห์พฤติกรรม
     if (useBehaviorMode) {
-      const behaviorRes = await fetch(
-        `http://127.0.0.1:5000/api/behavior/${currentLab}/${currentCamera}`,
-      );
+      const behaviorRes = await fetch(apiUrl(`/api/behavior/${currentLab}/${currentCamera}`));
       const behaviorData = await behaviorRes.json();
 
       if (behaviorData && !behaviorData.error) {
@@ -185,44 +233,101 @@ function animateNumber(el, newValue) {
   }, 30);
 }
 
-// 🎥 สลับกล้องถัดไป
-function nextCamera() {
-  currentCamera = currentCamera < totalCameras ? currentCamera + 1 : 1;
-  updateCameraFeed();
-}
-
-// 🎥 สลับกล้องก่อนหน้า
-function previousCamera() {
-  currentCamera = currentCamera > 1 ? currentCamera - 1 : totalCameras;
-  updateCameraFeed();
-}
-
 // 🎥 อัปเดต feed ปัจจุบัน
 function updateCameraFeed() {
   const feed = document.getElementById("liveFeed");
-  const label = document.getElementById("camLabel");
-  const cameraInfo = document.getElementById("cameraInfo");
+  const feedLabLabel = document.getElementById("feedLabLabel");
 
-  if (feed && label && cameraInfo) {
-    label.textContent = currentCamera;
-    cameraInfo.textContent = `กล้อง ${currentCamera}/${totalCameras}`;
-    if (isStreamActive(currentLab, currentCamera)) {
-      feed.src = `http://127.0.0.1:5000/api/stream/${currentLab}/${currentCamera}`;
-    } else {
-      feed.src = `http://127.0.0.1:5000/api/frame/${currentLab}/${currentCamera}?t=${Date.now()}`;
-    }
+  if (feedLabLabel) {
+    feedLabLabel.textContent =
+      document.getElementById("currentLabName")?.textContent || "รอบวิเคราะห์";
+  }
+
+  if (!feed || !currentLab) return;
+
+  if (isStreamActive(currentLab, currentCamera)) {
+    showActiveFeed(streamUrlFor(currentLab, currentCamera));
+  } else {
+    showFeedPlaceholder();
   }
 }
 
-// 🎥 เข้าแต่ละห้อง
-function enterLab(labId, labName) {
-  currentLab = labId;
+function makeSessionId(name) {
+  const slug = (name || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  return `${slug || "session"}_${Date.now()}`;
+}
+
+function getDefaultSessionName() {
+  return `รอบวิเคราะห์ ${new Date().toLocaleTimeString("th-TH", {
+    hour: "2-digit",
+    minute: "2-digit",
+  })}`;
+}
+
+function resetDashboardState() {
+  stopSourceStatusPolling();
+  latestExportData = null;
+  currentSourceType = null;
+  autoReportShown = false;
+  activeSources.clear();
+  _updateSourceStatus(null, null, null);
+  showFeedPlaceholder();
+
+  setTextIfPresent("detectedPeopleCount", "0");
+  setTextIfPresent("pcUsedCount", "0");
+  setTextIfPresent("pcFreeCount", "30");
+  setTextIfPresent("pcUsageRate", "0%");
+  setTextIfPresent("behaviorAttentive", "0 คน");
+  setTextIfPresent("behaviorSleeping", "0 คน");
+  setTextIfPresent("behaviorLookingDown", "0 คน");
+  setTextIfPresent("behaviorLookingAway", "0 คน");
+  setTextIfPresent("attentionRate", "0%");
+  setTextIfPresent("lastUpdate", "ตอนนี้");
+  setConnectionStatus("รอแหล่งภาพ");
+
+  const attentionBar = document.getElementById("attentionBar");
+  if (attentionBar) {
+    attentionBar.style.width = "0%";
+    attentionBar.className = "bg-green-500 h-3 rounded-full transition-all duration-500";
+  }
+
+  const activityList = document.getElementById("activityList");
+  if (activityList) {
+    activityList.innerHTML = `
+      <div class="flex items-center space-x-3 text-sm">
+        <div class="w-2 h-2 bg-gray-400 rounded-full"></div>
+        <span class="text-gray-600">--:--</span>
+        <span>รอข้อมูล...</span>
+      </div>
+    `;
+  }
+
+  const input = document.getElementById("videoFileInput");
+  if (input) input.value = "";
+}
+
+// 🎥 เริ่มรอบวิเคราะห์
+function startSession() {
+  const input = document.getElementById("sessionNameInput");
+  const name = input?.value.trim() || getDefaultSessionName();
+  openAnalysisSession(makeSessionId(name), name);
+}
+
+function openAnalysisSession(sessionId, sessionName) {
+  currentLab = sessionId;
+  currentSessionName = sessionName;
   currentCamera = 1;
 
   document.getElementById("labMenu").classList.add("hidden");
   document.getElementById("labInterface").classList.remove("hidden");
-  document.getElementById("currentLabName").textContent = labName;
+  document.getElementById("currentLabName").textContent = sessionName;
 
+  resetDashboardState();
   updateCameraFeed();
   startLiveFeed();
   initCharts(); // 📊 สร้างกราฟ
@@ -230,11 +335,12 @@ function enterLab(labId, labName) {
   startAlertPolling(); // 🔔 เริ่มยิงฟังการแจ้งเตือน
 }
 
-// 🔙 กลับไปหน้าเมนู
+// 🔙 กลับไปหน้าเริ่มต้น
 function backToMenu() {
   document.getElementById("labInterface").classList.add("hidden");
   document.getElementById("labMenu").classList.remove("hidden");
   currentLab = "";
+  currentSessionName = "";
 
   // หยุด intervals
   if (liveFeedInterval) {
@@ -243,6 +349,7 @@ function backToMenu() {
   }
   stopChartUpdates();
   stopAlertPolling(); // 🔔 หยุดยิงฟังแจ้งเตือน
+  resetDashboardState();
 }
 
 // 🌙 โหมดมืด / สว่าง
@@ -251,13 +358,13 @@ function toggleDarkMode() {
   const isDark = body.classList.contains("dark");
   if (isDark) {
     body.classList.remove("dark");
-    document.getElementById("themeIcon").textContent = "🌙";
-    document.getElementById("themeText").textContent = "โหมดมืด";
+    setTextIfPresent("themeIcon", "🌙");
+    setTextIfPresent("themeText", "โหมดมืด");
     localStorage.setItem("darkMode", "false");
   } else {
     body.classList.add("dark");
-    document.getElementById("themeIcon").textContent = "☀️";
-    document.getElementById("themeText").textContent = "โหมดสว่าง";
+    setTextIfPresent("themeIcon", "☀️");
+    setTextIfPresent("themeText", "โหมดสว่าง");
     localStorage.setItem("darkMode", "true");
   }
 }
@@ -274,6 +381,7 @@ function downloadReport(format) {
     const latest = s.latest_summary || {};
     data = {
       lab_id: latestExportData.lab_id,
+      session_name: currentSessionName || latestExportData.lab_id,
       export_time: latestExportData.export_time,
       avg_attention_rate: s.avg_attention_rate,
       avg_people: s.avg_people,
@@ -289,6 +397,7 @@ function downloadReport(format) {
   } else {
     data = {
       lab_id: labId,
+      session_name: currentSessionName || labId,
       export_time: new Date().toLocaleString("th-TH"),
       avg_attention_rate: 0,
       avg_people: 0,
@@ -340,10 +449,11 @@ function downloadReport(format) {
 // 🛠️ สร้างเนื้อหา CSV
 function buildCSV(data) {
   const rows = [
-    ["รายงานการใช้งานห้องแล็บ - ClassMood AI"],
+    ["รายงานรอบวิเคราะห์ - ClassMood AI"],
     [],
     ["ข้อมูลทั่วไป"],
-    ["ห้องแล็บ", data.lab_id],
+    ["รอบวิเคราะห์", data.session_name || data.lab_id],
+    ["รหัสรอบ", data.lab_id],
     ["เวลาส่งออก", data.export_time],
     [],
     ["สถิติรวม"],
@@ -382,9 +492,10 @@ function buildCSV(data) {
 // 🛠️ สร้างเนื้อหา Excel (TSV)
 function buildExcel(data) {
   const rows = [
-    ["รายงานการใช้งานห้องแล็บ - ClassMood AI"],
+    ["รายงานรอบวิเคราะห์ - ClassMood AI"],
     [],
-    ["ห้องแล็บ", data.lab_id],
+    ["รอบวิเคราะห์", data.session_name || data.lab_id],
+    ["รหัสรอบ", data.lab_id],
     ["เวลาส่งออก", data.export_time],
     [],
     ["จำนวนนักศึกษาเฉลี่ย (คน)", data.avg_people],
@@ -496,7 +607,7 @@ function downloadBlob(content, mimeType, filename) {
 // 🔄 รีเฟรชข้อมูล (ภาพ + ตัวเลข)
 function refreshData() {
   if (!currentLab) {
-    alert("⚠️ กรุณาเลือกห้องก่อนรีเฟรช");
+    alert("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อนรีเฟรช");
     return;
   }
   updateCameraFeed(); // โหลดภาพใหม่
@@ -508,16 +619,16 @@ function refreshData() {
 // 📊 เปิด modal และดึงข้อมูลจริงจาก backend
 async function exportReport() {
   if (!currentLab) {
-    alert("⚠️ กรุณาเลือกห้องก่อน");
+    alert("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อน");
     return;
   }
 
   const modal = document.getElementById("reportModal");
   if (modal) modal.classList.remove("hidden");
 
-  // ชื่อห้อง
+  // ชื่อรอบ
   const labName =
-    document.getElementById("currentLabName")?.textContent || "ไม่ทราบห้อง";
+    document.getElementById("currentLabName")?.textContent || "ไม่ทราบรอบ";
   const el = document.getElementById("reportLabName");
   if (el) el.textContent = labName;
 
@@ -536,11 +647,14 @@ async function exportReport() {
 
   // ดึงข้อมูลจาก backend
   try {
-    const res = await fetch(`http://127.0.0.1:5000/api/export/${currentLab}`);
+    const res = await fetch(apiUrl(`/api/export/${currentLab}`));
     const data = await res.json();
-    latestExportData = data;
+    latestExportData = {
+      ...data,
+      session_name: currentSessionName || data.lab_id,
+    };
 
-    const s = data.summary || {};
+    const s = latestExportData.summary || {};
     const latest = s.latest_summary || {};
 
     const set = (id, text) => {
@@ -711,7 +825,7 @@ async function updateCharts() {
   if (!currentLab) return;
 
   try {
-    const res = await fetch(`http://127.0.0.1:5000/api/stats/${currentLab}`);
+    const res = await fetch(apiUrl(`/api/stats/${currentLab}`));
     const data = await res.json();
 
     if (attentionChart && data.labels) {
@@ -744,9 +858,7 @@ async function updateActivityLog() {
   if (!currentLab) return;
 
   try {
-    const res = await fetch(
-      `http://127.0.0.1:5000/api/activities/${currentLab}`,
-    );
+    const res = await fetch(apiUrl(`/api/activities/${currentLab}`));
     const data = await res.json();
 
     const activityList = document.getElementById("activityList");
@@ -806,12 +918,16 @@ document.addEventListener("DOMContentLoaded", function () {
   const savedDarkMode = localStorage.getItem("darkMode");
   if (savedDarkMode === "true") {
     document.body.classList.add("dark");
-    document.getElementById("themeIcon").textContent = "☀️";
-    document.getElementById("themeText").textContent = "โหมดสว่าง";
+    setTextIfPresent("themeIcon", "☀️");
+    setTextIfPresent("themeText", "โหมดสว่าง");
   }
-  // 🏠 อัปเดต overview card หน้าเมนูทุก 8 วินาที
-  updateOverview();
-  setInterval(updateOverview, 8000);
+
+  const sessionInput = document.getElementById("sessionNameInput");
+  if (sessionInput) {
+    sessionInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") startSession();
+    });
+  }
 });
 
 // =============================================
@@ -831,11 +947,71 @@ function stopAlertPolling() {
   }
 }
 
+function startSourceStatusPolling() {
+  stopSourceStatusPolling();
+  if (!currentLab || currentSourceType !== "video") return;
+  checkSourceStatus();
+  sourceStatusInterval = setInterval(checkSourceStatus, 1000);
+}
+
+function stopSourceStatusPolling() {
+  if (sourceStatusInterval) {
+    clearInterval(sourceStatusInterval);
+    sourceStatusInterval = null;
+  }
+}
+
+async function checkSourceStatus() {
+  if (!currentLab || currentSourceType !== "video") return;
+
+  try {
+    const res = await fetch(apiUrl(`/api/sources/${currentLab}/${currentCamera}/status`));
+    if (!res.ok) return;
+    const data = await res.json();
+
+    if (data.source_type === "video" && data.ended) {
+      await handleVideoEnded(data);
+    } else if (data.error) {
+      setConnectionStatus("แหล่งภาพมีปัญหา", "text-red-600");
+      setSourceStatusText(`● Error: ${data.error}`, "text-xs font-medium text-red-600");
+      stopSourceStatusPolling();
+    }
+  } catch (_) {
+    /* server not running is fine */
+  }
+}
+
+async function handleVideoEnded(data) {
+  if (autoReportShown || !currentLab) return;
+  autoReportShown = true;
+  stopSourceStatusPolling();
+
+  if (liveFeedInterval) {
+    clearInterval(liveFeedInterval);
+    liveFeedInterval = null;
+  }
+  stopChartUpdates();
+  stopAlertPolling();
+
+  const label = data.source ? data.source.split(/[\\/]/).pop() : "";
+  setConnectionStatus("คลิปจบแล้ว", "text-blue-600");
+  setSourceStatusText(
+    label ? `■ คลิปจบแล้ว: ${label}` : "■ คลิปจบแล้ว",
+    "text-xs font-medium text-blue-600",
+  );
+  showToast("คลิปวิดีโอจบแล้ว กำลังเตรียมรายงาน", "info");
+
+  await updateLiveFeed();
+  await updateCharts();
+  setTextIfPresent("detectionCount", "คลิปจบแล้ว");
+  activeSources.delete(_srcKey(currentLab, currentCamera));
+  await exportReport();
+  showToast("รายงานพร้อมแล้ว เลือกรูปแบบไฟล์ที่ต้องการดาวน์โหลด", "success");
+}
+
 async function pollAlerts() {
   try {
-    const res = await fetch(
-      `http://127.0.0.1:5000/api/alerts?since_id=${lastAlertId}`,
-    );
+    const res = await fetch(apiUrl(`/api/alerts?since_id=${lastAlertId}`));
     if (!res.ok) return;
     const data = await res.json();
     for (const alert of data.alerts || []) {
@@ -855,6 +1031,7 @@ function showToast(message, type = "info") {
   const colors = {
     warning: "bg-yellow-500",
     alert: "bg-red-600",
+    success: "bg-green-600",
     info: "bg-blue-500",
   };
   const bg = colors[type] || "bg-gray-700";
@@ -880,103 +1057,73 @@ function showToast(message, type = "info") {
 }
 
 // =============================================
-// 🏠  Overview card updater
-// =============================================
-
-async function updateOverview() {
-  try {
-    const res = await fetch("http://127.0.0.1:5000/api/overview");
-    if (!res.ok) return;
-    const data = await res.json();
-    for (const [labId, info] of Object.entries(data.labs || {})) {
-      const elPeople = document.getElementById(`ov-${labId}-people`);
-      const elAttention = document.getElementById(`ov-${labId}-attention`);
-      const elTime = document.getElementById(`ov-${labId}-time`);
-      if (!elPeople) continue;
-
-      elPeople.textContent = info.has_data ? info.total_people : "-";
-      elTime.textContent = info.last_updated;
-
-      const pct = info.attention_rate;
-      const color =
-        pct >= 70
-          ? "text-green-600"
-          : pct >= 40
-            ? "text-yellow-500"
-            : "text-red-500";
-      elAttention.className = `font-medium ${color}`;
-      elAttention.textContent = info.has_data ? `${pct}%` : "-%";
-    }
-  } catch (_) {
-    /* server not running is fine */
-  }
-}
-
-// =============================================
 // 🎥 Video Source Management
 // =============================================
 
 /**
- * ตั้ง live source สำหรับกล้องตัวและ lab นั้นๆ
- * @param {string} labId - เช่น "9226"
- * @param {number} camId - เช่น 1 หรือ 2
+ * ตั้ง live source สำหรับแหล่งภาพหลักของรอบวิเคราะห์
+ * @param {string} labId - session id สำหรับ backend
+ * @param {number} camId - backend source id ปัจจุบันใช้ 1 เป็นแหล่งหลัก
  * @param {number|string} source - webcam index (0,1,...) หรือ path ไฟล์ .mp4
+ * @param {string|null} displayLabel - label ที่แสดงใน UI
  */
-async function setVideoSource(labId, camId, source) {
+async function setVideoSource(labId, camId, source, displayLabel = null) {
   if (!labId) {
-    showToast("⚠️ กรุณาเลือกห้องก่อน", "warning");
+    showToast("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อน", "warning");
     return;
   }
   try {
-    const res = await fetch(
-      `http://127.0.0.1:5000/api/sources/${labId}/${camId}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source }),
-      },
-    );
-    const data = await res.json();
+    const res = await fetch(apiUrl(`/api/sources/${labId}/${camId}`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source }),
+    });
+    const data = await readResponsePayload(res);
     if (data.ok) {
+      currentSourceType =
+        data.source_type || (typeof source === "number" ? "webcam" : "video");
+      autoReportShown = false;
+      streamReloadToken += 1;
       activeSources.add(_srcKey(labId, camId));
       updateCameraFeed();
-      const srcLabel = typeof source === "number" ? `Webcam ${source}` : source;
+      startLiveFeed();
+      startChartUpdates();
+      startAlertPolling();
+      const srcLabel =
+        displayLabel || (typeof source === "number" ? `Webcam ${source}` : source);
+      setConnectionStatus("เชื่อมต่อแล้ว", "text-green-600");
       showToast(`✅ เชื่อมต่อสำเร็จ: ${srcLabel}`, "success");
       _updateSourceStatus(labId, camId, srcLabel);
+      startSourceStatusPolling();
     } else {
+      currentSourceType = null;
+      stopSourceStatusPolling();
+      setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
       showToast(`❌ เชื่อมต่อไม่สำเร็จ: ${data.error || ""}`, "alert");
     }
   } catch (e) {
+    currentSourceType = null;
+    stopSourceStatusPolling();
+    setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
     showToast(`❌ เชื่อมต่อไม่สำเร็จ: ${e.message}`, "alert");
   }
 }
 
-/**
- * ยกเลิก live source — กลับสู่โหมดรูปนิ่ง
- */
-async function clearVideoSource(labId, camId) {
-  try {
-    await fetch(`http://127.0.0.1:5000/api/sources/${labId}/${camId}`, {
-      method: "DELETE",
-    });
-    activeSources.delete(_srcKey(labId, camId));
-    updateCameraFeed();
-    showToast("📷 กลับสู่โหมดรูปนิ่ง", "info");
-    _updateSourceStatus(labId, camId, null);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 function _updateSourceStatus(labId, camId, srcLabel) {
-  const el = document.getElementById("sourceStatus");
-  if (!el) return;
-  el.textContent = srcLabel
-    ? `● Live: ${srcLabel} (กล้อง ${camId})`
-    : "○ โหมด: รูปนิ่ง";
-  el.className = srcLabel
+  const text = srcLabel
+    ? `● Live: ${srcLabel}`
+    : "○ รอเลือกเว็บแคมหรือคลิป";
+  const className = srcLabel
     ? "text-xs font-medium text-green-600"
     : "text-xs text-gray-500";
+  setSourceStatusText(text, className);
+}
+
+function setSourceStatusText(text, className = "text-xs text-gray-500") {
+  const el = document.getElementById("sourceStatus");
+  if (!el) return;
+  el.textContent = text;
+  el.className = className;
 }
 
 // ฟังก์ชันสำหรับปุ่มใน UI
@@ -986,14 +1133,53 @@ function connectWebcam() {
 }
 
 function connectVideoFile() {
-  const path = document.getElementById("videoPathInput")?.value.trim();
-  if (!path) {
-    showToast("⚠️ กรุณาใส่ path ไฟล์วิดีโอ", "warning");
+  if (!currentLab) {
+    showToast("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อน", "warning");
     return;
   }
-  setVideoSource(currentLab, currentCamera, path);
+
+  const input = document.getElementById("videoFileInput");
+  const file = input?.files?.[0];
+  if (!file) {
+    showToast("⚠️ กรุณาเลือกไฟล์วิดีโอก่อน", "warning");
+    return;
+  }
+
+  uploadAndUseVideo(file);
 }
 
-function disconnectSource() {
-  clearVideoSource(currentLab, currentCamera);
+async function uploadAndUseVideo(file) {
+  const btn = document.getElementById("uploadVideoBtn");
+  const oldLabel = btn?.textContent.trim() || "อัปโหลดคลิป";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "กำลังอัปโหลด...";
+    btn.classList.add("opacity-60", "cursor-not-allowed");
+  }
+
+  try {
+    const formData = new FormData();
+    formData.append("video", file);
+
+    const res = await fetch(apiUrl("/api/videos"), {
+      method: "POST",
+      body: formData,
+    });
+    const data = await readResponsePayload(res);
+
+    if (!res.ok || !data.ok) {
+      showToast(`❌ อัปโหลดไม่สำเร็จ: ${data.error || res.statusText}`, "alert");
+      return;
+    }
+
+    await setVideoSource(currentLab, currentCamera, data.source, data.filename);
+  } catch (e) {
+    showToast(`❌ อัปโหลดไม่สำเร็จ: ${e.message}`, "alert");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = oldLabel || "อัปโหลดคลิป";
+      btn.classList.remove("opacity-60", "cursor-not-allowed");
+    }
+  }
 }

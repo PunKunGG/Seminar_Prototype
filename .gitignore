@@ -28,6 +28,12 @@ ENV/
 *.log
 logs/
 
+# Uploaded/runtime videos
+backend/video_sources/
+
+# Runtime analysis data
+backend/data/stats.json
+
 # Environment variables
 .env
 .env.local

@@ -1,169 +1,257 @@
-# ClassMood AI - ระบบวิเคราะห์พฤติกรรมนักศึกษาในห้องเรียนด้วย AI
+# ClassMood AI
 
-ระบบตรวจสอบและวิเคราะห์พฤติกรรมนักศึกษาในห้องแล็บคอมพิวเตอร์แบบ Real-time โดยใช้ YOLOv8 Pose Estimation
+ระบบเว็บสำหรับวิเคราะห์พฤติกรรมนักศึกษาในชั้นเรียนจากเว็บแคมหรือไฟล์วิดีโอ โดยใช้ YOLOv8 และ YOLOv8 Pose Estimation
 
----
+ระบบนี้ออกแบบให้ใช้งานแบบไม่ต้องเชื่อมต่อ CCTV: เริ่มรอบวิเคราะห์ เลือกเว็บแคมหรืออัปโหลดคลิป แล้วให้ระบบวิเคราะห์จนจบคลิปและเปิดรายงานให้อัตโนมัติ
 
-![gif](https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExNWhvdDJjM2pkaGFxNDdtYmpzM2U4eDd3c2UwaW9rcTMyYnplb2c3diZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/Lopx9eUi34rbq/giphy.gif)
+## สิ่งที่ระบบทำได้
 
-## ฟีเจอร์หลัก
+- วิเคราะห์พฤติกรรมจากภาพวิดีโอ เช่น ตั้งใจเรียน หลับ ก้มหน้า/โทรศัพท์ และมองออก
+- ใช้ได้ทั้งเว็บแคมและไฟล์วิดีโอ
+- อัปโหลดคลิปผ่านหน้าเว็บได้โดยตรง
+- คลิปวิดีโอจะไม่วนซ้ำ เมื่อคลิปจบ ระบบจะเปิดหน้ารายงานให้อัตโนมัติ
+- แสดงกราฟความตั้งใจเรียนและสัดส่วนพฤติกรรมแบบ real time
+- ส่งออกรายงานเป็น PDF, Excel, CSV หรือ JSON
+- เก็บข้อมูล runtime ไว้เฉพาะเครื่อง ไม่ควร commit ขึ้น repo
 
-- **วิเคราะห์พฤติกรรมด้วย AI** - ตรวจจับท่าทาง (ตั้งใจเรียน/หลับ/ก้มหน้า/มองออก)
-- **กราฟสถิติ Real-time** - แสดงความตั้งใจเรียนและสัดส่วนพฤติกรรม
-- **รองรับหลายกล้อง** - ตรวจสอบหลายมุมมองในห้องเดียวกัน
-- **ประวัติย้อนหลัง** - เก็บข้อมูลสถิติและกิจกรรม
-- **Export รายงาน** - ส่งออกเป็น PDF, Excel, CSV, JSON
+## โครงสร้างโปรเจกต์
 
-## เทคโนโลยีที่ใช้
+```text
+Seminar_Prototype/
+├── backend/
+│   ├── server.py              # Flask server และ API หลัก
+│   ├── behavior_analyzer.py   # วิเคราะห์ pose และพฤติกรรม
+│   ├── detector.py            # ตัวช่วยตรวจจับวัตถุ/คน
+│   ├── data/                  # runtime data เช่น stats.json (ignored)
+│   ├── test_images/           # รูปทดสอบเก่าหรือ fallback
+│   └── video_sources/         # วิดีโอที่อัปโหลดผ่านเว็บ (ignored)
+├── dashboard/
+│   ├── index.html             # หน้าเว็บหลัก
+│   ├── shared.js              # logic ฝั่ง frontend
+│   ├── style.css              # style เพิ่มเติม
+│   └── asset/                 # รูป/โลโก้
+├── requirements.txt
+├── .gitignore
+└── README.md
+```
 
-### Backend
+## สิ่งที่ไม่ควร commit
 
-- Python 3.11
-- Flask (Web Framework)
-- YOLOv8 (Object Detection)
-- YOLOv8-pose (Pose Estimation)
-- OpenCV (Image Processing)
+ไฟล์เหล่านี้เป็นไฟล์ runtime หรือไฟล์ขนาดใหญ่ และถูกใส่ไว้ใน `.gitignore` แล้ว:
 
-### Frontend
+- `venv/`, `.venv/`
+- `*.pt`, `*.onnx`, `*.weights`
+- `backend/video_sources/`
+- `backend/data/stats.json`
+- `__pycache__/`
 
-- HTML5 / CSS3 / JavaScript
-- TailwindCSS (UI Framework)
-- Chart.js (Data Visualization)
+ถ้า `backend/data/stats.json` เคยถูก track ไปแล้ว ให้เลิก track ด้วยคำสั่งนี้ครั้งเดียว:
 
-## การติดตั้ง
+```powershell
+git rm --cached -- backend/data/stats.json
+```
 
-### 1. Clone Repository
+คำสั่งนี้ไม่ลบไฟล์จริงในเครื่อง แค่บอก Git ว่าไม่ต้องตามไฟล์นี้แล้ว
+
+## การติดตั้งหลัง clone repo
+
+### 1. Clone repo
 
 ```bash
-git clone https://github.com/Siwapad/Seminar_Prototype.git
+git clone <repository-url>
 cd Seminar_Prototype
 ```
 
-### 2. สร้าง Virtual Environment
+### 2. สร้าง virtual environment
 
-```bash
-python -m venv venv
-```
-
-### 3. เปิดใช้งาน Virtual Environment
-
-**Windows (PowerShell):**
+Windows:
 
 ```powershell
-venv\Scripts\Activate.ps1
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 ```
 
-**Windows (CMD):**
+ถ้าใช้ CMD:
 
 ```cmd
+python -m venv venv
 venv\Scripts\activate.bat
 ```
 
-**macOS/Linux:**
+macOS/Linux:
 
 ```bash
+python -m venv venv
 source venv/bin/activate
 ```
 
-### 4. ติดตั้ง Dependencies
+แนะนำให้เช็ก Python ก่อนติดตั้ง dependency:
 
 ```bash
-pip install flask flask-cors ultralytics opencv-python
+python --version
 ```
 
-### 5. ดาวน์โหลด YOLO Models
+โปรเจกต์นี้พัฒนากับ Python 3.11 ถ้าใช้ Python ใหม่มาก ๆ แล้วติดปัญหา dependency ให้ลองใช้ Python 3.10 หรือ 3.11
 
-โมเดลจะดาวน์โหลดอัตโนมัติในครั้งแรกที่รัน หรือดาวน์โหลดเองได้ที่:
+### 3. ติดตั้ง dependencies
 
-- [yolov8n.pt](https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt) (~6MB)
-- [yolov8n-pose.pt](https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n-pose.pt) (~6MB)
+```bash
+pip install -r requirements.txt
+```
 
-วางไฟล์ไว้ใน root directory ของโปรเจกต์
+Dependencies หลักอยู่ใน `requirements.txt`:
 
-## การใช้งาน
+- Flask
+- Flask-CORS
+- Ultralytics
+- OpenCV
+- NumPy
 
-### รัน Server
+### 4. เตรียมไฟล์โมเดล YOLO
+
+ระบบจะพยายามหาไฟล์โมเดลใน `backend/` และ project root ก่อน ถ้าไม่เจอ Ultralytics จะพยายามดาวน์โหลดให้อัตโนมัติในครั้งแรกที่รัน
+
+ไฟล์ที่ใช้ได้:
+
+- `yolov8s.pt` หรือ `yolov8n.pt` สำหรับตรวจจับคน
+- `yolov8s-pose.pt` หรือ `yolov8n-pose.pt` สำหรับวิเคราะห์ท่าทาง
+
+วางไฟล์ไว้ได้ที่:
+
+```text
+Seminar_Prototype/
+backend/
+```
+
+หรือ project root:
+
+```text
+Seminar_Prototype/
+```
+
+หมายเหตุ: ไฟล์ `.pt` ถูก ignore เพราะมีขนาดใหญ่ จึงต้องดาวน์โหลดหรือคัดลอกมาเองหลัง clone repo
+
+## วิธีรัน
+
+จาก project root:
 
 ```bash
 cd backend
 python server.py
 ```
 
-Server จะรันที่ http://127.0.0.1:5000
+จากนั้นเปิดเว็บ:
 
-### เปิดใช้งาน Dashboard
-
-เปิดเว็บเบราว์เซอร์ไปที่:
-
-```
+```text
 http://127.0.0.1:5000
 ```
 
-### การใช้งานหน้าเว็บ
+ถ้าต้องการเปลี่ยน host หรือ port:
 
-1. **เลือกห้องแล็บ** - คลิกที่ห้องที่ต้องการตรวจสอบ
-2. **สลับโหมด** - คลิกปุ่ม "โหมด: วิเคราะห์พฤติกรรม" เพื่อสลับโหมด
-3. **สลับกล้อง** - ใช้ปุ่มลูกศรซ้าย/ขวา เพื่อเปลี่ยนมุมมอง
-4. **ดูกราฟ** - กราฟจะอัปเดตทุก 2 วินาที
-5. **Export รายงาน** - คลิกปุ่ม "ส่งออกรายงาน"
+Windows PowerShell:
 
-## โครงสร้างโปรเจกต์
-
-```
-Seminar_Prototype/
-├── backend/
-│   ├── server.py              # Flask API Server
-│   ├── behavior_analyzer.py   # Pose Analysis Module
-│   ├── detector.py           # Object Detection
-│   └── test_images/          # รูปภาพทดสอบ
-│       ├── 9226_1.png
-│       ├── 9226_2.png
-│       ├── 9227_1.PNG
-│       └── 9227_2.PNG
-├── dashboard/
-│   ├── index.html            # หน้าเว็บหลัก
-│   ├── shared.js            # JavaScript Functions
-│   └── style.css            # Custom Styles
-├── venv/                     # Virtual Environment (ignored)
-├── yolov8n.pt               # YOLO Model (ignored)
-├── yolov8n-pose.pt          # YOLO Pose Model (ignored)
-├── .gitignore
-└── README.md
+```powershell
+$env:CLASSMOOD_HOST="127.0.0.1"
+$env:CLASSMOOD_PORT="5000"
+python server.py
 ```
 
-## API Endpoints
+macOS/Linux:
 
-| Endpoint                                | Method | คำอธิบาย                       |
-| --------------------------------------- | ------ | ------------------------------ |
-| `/`                                     | GET    | หน้าเว็บหลัก                   |
-| `/api/frame/{lab_id}/{cam_id}`          | GET    | ภาพจากกล้อง + Object Detection |
-| `/api/data/{lab_id}/{cam_id}`           | GET    | ข้อมูลจำนวนคน                  |
-| `/api/behavior/{lab_id}/{cam_id}`       | GET    | ข้อมูลการวิเคราะห์พฤติกรรม     |
-| `/api/behavior-frame/{lab_id}/{cam_id}` | GET    | ภาพ + Behavior Annotation      |
-| `/api/stats/{lab_id}`                   | GET    | สถิติย้อนหลัง                  |
-| `/api/activities/{lab_id}`              | GET    | Activity Log                   |
-
-## การเพิ่มรูปภาพทดสอบ
-
-วางรูปภาพใน `backend/test_images/` ตามรูปแบบ:
-
-```
-{lab_id}_{camera_id}.png
+```bash
+CLASSMOOD_HOST=127.0.0.1 CLASSMOOD_PORT=5000 python server.py
 ```
 
-ตัวอย่าง:
+## วิธีใช้งานหน้าเว็บ
 
-- `9226_1.png` - ห้อง 9226 กล้องที่ 1
-- `9226_2.png` - ห้อง 9226 กล้องที่ 2
+1. เปิด `http://127.0.0.1:5000`
+2. ตั้งชื่อรอบวิเคราะห์ เช่น `คลิปทดลองช่วงเช้า`
+3. กด `เริ่มวิเคราะห์`
+4. เลือกแหล่งภาพ
+   - `เว็บแคม` สำหรับกล้องที่ต่อกับเครื่อง
+   - `อัปโหลดคลิป` สำหรับไฟล์ `.mp4`, `.avi`, `.mov`, `.mkv`, `.webm`
+5. ระบบจะแสดงภาพวิเคราะห์และกราฟแบบ real time
+6. ถ้าเป็นคลิปวิดีโอ เมื่อคลิปจบ ระบบจะเปิดรายงานให้อัตโนมัติ
+7. เลือกรูปแบบไฟล์ที่ต้องการดาวน์โหลด หรือปิด modal ถ้ายังไม่ต้องการดาวน์โหลด
 
-## การพัฒนาต่อ
+## ข้อมูล runtime
 
-- [ ] เชื่อมต่อ Webcam/RTSP แบบ Real-time
-- [ ] เพิ่ม Database (SQLite) บันทึกข้อมูลถาวร
-- [ ] ระบบแจ้งเตือน (LINE/Email)
-- [ ] หน้า Login สำหรับอาจารย์
-- [ ] Face Recognition ระบุตัวตนนักศึกษา
-- [ ] Emotion Detection วิเคราะห์อารมณ์
+ระบบจะสร้าง/แก้ไฟล์เหล่านี้ระหว่างใช้งาน:
+
+- `backend/video_sources/` เก็บวิดีโอที่อัปโหลดผ่านหน้าเว็บ
+- `backend/data/stats.json` เก็บสถิติและ activity log ของรอบวิเคราะห์
+
+ไฟล์เหล่านี้เปลี่ยนทุกครั้งที่ทดสอบ จึงไม่ควร commit ขึ้น repo
+
+## API สำคัญ
+
+| Endpoint | Method | ใช้ทำอะไร |
+| --- | --- | --- |
+| `/` | GET | หน้าเว็บหลัก |
+| `/api/videos` | POST | อัปโหลดไฟล์วิดีโอ |
+| `/api/sources/<session_id>/<source_id>` | POST | ตั้งแหล่งภาพเป็นเว็บแคมหรือคลิป |
+| `/api/sources/<session_id>/<source_id>/status` | GET | เช็กสถานะ source เช่น คลิปจบหรือยัง |
+| `/api/stream/<session_id>/<source_id>` | GET | MJPEG stream สำหรับแสดงภาพในเว็บ |
+| `/api/data/<session_id>/<source_id>` | GET | จำนวนคนและความมั่นใจจาก detection |
+| `/api/behavior/<session_id>/<source_id>` | GET | ผลวิเคราะห์พฤติกรรม |
+| `/api/stats/<session_id>` | GET | ข้อมูลย้อนหลังสำหรับกราฟ |
+| `/api/activities/<session_id>` | GET | activity log |
+| `/api/export/<session_id>` | GET | ข้อมูลรายงาน |
+| `/api/alerts` | GET | แจ้งเตือนล่าสุด |
+
+หมายเหตุ: ชื่อ route ยังใช้คำว่า `lab_id` ใน backend บางจุดจากโค้ดเดิม แต่ในหน้าเว็บปัจจุบันเราใช้เป็น `session_id` หรือรหัสรอบวิเคราะห์
+
+## Environment variables
+
+| ชื่อ | ค่าเริ่มต้น | คำอธิบาย |
+| --- | --- | --- |
+| `CLASSMOOD_HOST` | `127.0.0.1` | host ที่ Flask bind |
+| `CLASSMOOD_PORT` | `5000` | port ของ server |
+| `CLASSMOOD_DEBUG` | ปิด | เปิด debug mode เมื่อ set เป็น `1` หรือ `true` |
+| `CLASSMOOD_ALLOWED_ORIGINS` | `http://127.0.0.1:5000,http://localhost:5000` | CORS origins ที่อนุญาต |
+| `CLASSMOOD_VIDEO_DIRS` | `backend/video_sources` | โฟลเดอร์ที่อนุญาตให้ใช้ไฟล์วิดีโอ |
+| `CLASSMOOD_MAX_VIDEO_UPLOAD_MB` | `512` | ขนาดอัปโหลดสูงสุดเป็น MB |
+| `CLASSMOOD_MAX_WEBCAM_INDEX` | `9` | index เว็บแคมสูงสุดที่อนุญาต |
+| `CLASSMOOD_ALLOW_ANY_VIDEO_PATH` | ปิด | ถ้าเปิด จะยอมรับ path วิดีโอนอกโฟลเดอร์ที่กำหนด |
+| `CLASSMOOD_ALLOW_REMOTE_SOURCE_CONTROL` | ปิด | ถ้าเปิด จะอนุญาตให้เครื่องอื่นตั้ง source ได้ |
+
+## แก้ปัญหาที่พบบ่อย
+
+### เปิด server แล้วบอกว่าไม่มี Flask
+
+มักเกิดจากยังไม่ได้เข้า virtual environment หรือใช้ Python คนละตัวกับที่ติดตั้ง dependency
+
+```bash
+python -m pip install -r requirements.txt
+python -c "import flask; print(flask.__version__)"
+```
+
+### เปิดหน้าเว็บแล้ว CDN โหลดไม่ได้
+
+หน้าเว็บใช้ CDN สำหรับ TailwindCSS, Chart.js, html2canvas และ jsPDF ถ้าเครื่องไม่มีอินเทอร์เน็ต อาจทำให้ UI หรือ export PDF ทำงานไม่ครบ
+
+### อัปโหลดวิดีโอแล้วไฟล์ใหญ่เกิน
+
+ค่าเริ่มต้นคือ 512 MB ปรับได้ด้วย:
+
+```powershell
+$env:CLASSMOOD_MAX_VIDEO_UPLOAD_MB="1024"
+```
+
+### เปลี่ยนคลิปแล้วภาพยังค้าง
+
+ให้ refresh หน้าเว็บก่อนหนึ่งครั้ง ถ้ายังเกิดซ้ำ ให้เช็กว่า browser โหลด `dashboard/shared.js` เวอร์ชันล่าสุดแล้ว
+
+## สรุป workflow สำหรับย้ายเครื่อง
+
+1. Clone repo
+2. สร้างและ activate virtual environment
+3. `pip install -r requirements.txt`
+4. เตรียมไฟล์ YOLO `.pt` หรือปล่อยให้ดาวน์โหลดตอนรันครั้งแรก
+5. `cd backend`
+6. `python server.py`
+7. เปิด `http://127.0.0.1:5000`
+8. เริ่มรอบวิเคราะห์และทดสอบด้วยเว็บแคมหรือคลิปวิดีโอ
 
 ## ผู้พัฒนา
 
@@ -172,6 +260,4 @@ Seminar_Prototype/
 | `663380026-5 ศิวภาส ภูศรีอ่อน (ข้าวปั้น)` | [PunKunGG](https://github.com/PunKunGG) |
 | `663380507-9 นิภาดา ญายะนันท์ (มิ้น)`  | [MintNiphada](https://github.com/MintNiphada) | 
 
-## License
-
-MIT License
+โปรเจกต์สัมมนา - ระบบวิเคราะห์พฤติกรรมนักศึกษาในชั้นเรียนด้วย AI

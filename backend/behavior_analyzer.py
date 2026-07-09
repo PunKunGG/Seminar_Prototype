@@ -11,22 +11,31 @@ from ultralytics import YOLO
 import numpy as np
 import cv2
 import os
+import threading
 
 # ──────────────────────────────────────────────
 # โมเดล (lazy-loading)
 # ──────────────────────────────────────────────
 pose_model = None
+pose_model_lock = threading.Lock()
 _MODEL_NAME = "yolov8s-pose.pt"   # small > nano (ดาวน์โหลดอัตโนมัติถ้ายังไม่มี)
 
 def get_pose_model():
     global pose_model
     if pose_model is None:
         base = os.path.dirname(os.path.abspath(__file__))
-        small_path = os.path.join(base, _MODEL_NAME)
-        nano_path  = os.path.join(base, "yolov8n-pose.pt")
-        if os.path.exists(small_path):
+        root = os.path.abspath(os.path.join(base, os.pardir))
+        small_path = next(
+            (p for p in (os.path.join(base, _MODEL_NAME), os.path.join(root, _MODEL_NAME)) if os.path.exists(p)),
+            None,
+        )
+        nano_path = next(
+            (p for p in (os.path.join(base, "yolov8n-pose.pt"), os.path.join(root, "yolov8n-pose.pt")) if os.path.exists(p)),
+            None,
+        )
+        if small_path:
             pose_model = YOLO(small_path)
-        elif os.path.exists(nano_path):
+        elif nano_path:
             print("⚠️  yolov8s-pose.pt ไม่พบ — ใช้ yolov8n-pose.pt แทน")
             pose_model = YOLO(nano_path)
         else:
@@ -236,14 +245,15 @@ def analyze_frame(frame: np.ndarray) -> dict:
     """
     processed = preprocess_frame(frame)
 
-    model   = get_pose_model()
-    results = model(
-        processed,
-        verbose=False,
-        conf=0.35,   # detection confidence ต่ำลงเพื่อจับคนที่ถูกจอบดบัง
-        iou=0.45,    # NMS IoU ป้องกัน duplicate detection
-        imgsz=640,
-    )
+    with pose_model_lock:
+        model   = get_pose_model()
+        results = model(
+            processed,
+            verbose=False,
+            conf=0.35,   # detection confidence ต่ำลงเพื่อจับคนที่ถูกจอบดบัง
+            iou=0.45,    # NMS IoU ป้องกัน duplicate detection
+            imgsz=640,
+        )
 
     _empty = {
         "total_people": 0,

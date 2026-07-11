@@ -17,7 +17,7 @@
       class="bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg"
     >
       <div class="container mx-auto px-6 py-4">
-        <div class="flex items-center justify-between">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex items-center space-x-3">
             <div
               class="w-16 h-16 rounded-2xl flex items-center justify-center overflow-hidden"
@@ -34,13 +34,30 @@
               <p class="text-blue-100 text-sm">ระบบวิเคราะห์พฤติกรรมในชั้นเรียน</p>
             </div>
           </div>
-          <div class="flex items-center space-x-4">
+          <div
+            class="flex w-full rounded-xl bg-white/15 p-1 shadow-inner ring-1 ring-white/30 sm:w-auto"
+            role="group"
+            aria-label="เลือกโหมดตรวจจับ"
+          >
             <button
-              onclick="toggleBehaviorMode()"
-              id="behaviorModeBtn"
-              class="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded-lg text-sm transition-colors"
+              type="button"
+              onclick="setBehaviorMode(true)"
+              id="behaviorModeBehaviorBtn"
+              class="flex-1 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 shadow-sm transition-colors sm:flex-none"
+              aria-pressed="true"
             >
-              โหมด: วิเคราะห์พฤติกรรม
+              <span class="mr-1 text-xs font-bold">AI</span>
+              พฤติกรรม
+            </button>
+            <button
+              type="button"
+              onclick="setBehaviorMode(false)"
+              id="behaviorModeCountBtn"
+              class="flex-1 rounded-lg px-3 py-1.5 text-sm font-semibold text-white/85 transition-colors hover:bg-white/10 hover:text-white sm:flex-none"
+              aria-pressed="false"
+            >
+              <span class="mr-1 text-xs font-bold">คน</span>
+              นับคน
             </button>
           </div>
         </div>
@@ -100,7 +117,7 @@
       <!-- Analysis Interface -->
       <div id="labInterface" class="hidden space-y-6">
         <!-- Back Button and Session Info -->
-        <div class="flex items-center justify-between">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <button
             onclick="backToMenu()"
             class="flex items-center space-x-2 bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors"
@@ -198,7 +215,7 @@
         </div>
 
         <!-- Camera Views and Statistics -->
-        <div class="grid lg:grid-cols-3 gap-6">
+        <div class="grid lg:grid-cols-3 gap-6 items-start">
           <!-- Camera Feed -->
           <div class="lg:col-span-2 space-y-4">
             <div class="bg-white rounded-xl shadow-lg p-6">
@@ -210,7 +227,7 @@
 
               <!-- Camera Display -->
               <div
-                class="camera-feed rounded-lg h-80 relative flex items-center justify-center bg-black"
+                class="camera-feed rounded-lg h-64 sm:h-80 xl:h-[420px] relative flex items-center justify-center bg-black"
               >
                 <img
                   id="liveFeed"
@@ -261,30 +278,6 @@
                 <canvas id="attentionChart"></canvas>
               </div>
             </div>
-
-            <!-- Behavior Pie Chart -->
-            <div class="bg-white rounded-xl shadow-lg p-6">
-              <h3 class="text-lg font-semibold text-gray-800 mb-4">
-                สัดส่วนพฤติกรรม
-              </h3>
-              <div class="h-48">
-                <canvas id="behaviorPieChart"></canvas>
-              </div>
-            </div>
-
-            <!-- Activity Timeline -->
-            <div class="bg-white rounded-xl shadow-lg p-6">
-              <h3 class="text-lg font-semibold text-gray-800 mb-4">
-                กิจกรรมล่าสุด
-              </h3>
-              <div id="activityList" class="space-y-3 max-h-40 overflow-y-auto">
-                <div class="flex items-center space-x-3 text-sm">
-                  <div class="w-2 h-2 bg-gray-400 rounded-full"></div>
-                  <span class="text-gray-600">--:--</span>
-                  <span>รอข้อมูล...</span>
-                </div>
-              </div>
-            </div>
           </div>
 
           <!-- Statistics Panel -->
@@ -320,10 +313,26 @@
                   >
                 </div>
                 <div class="flex items-center justify-between text-sm">
-                  <span class="text-gray-600">มองออก</span>
+                  <span class="text-gray-600">ยกมือ</span>
                   <span
-                    id="behaviorLookingAway"
-                    class="bg-yellow-100 text-yellow-800 px-2 py-1 rounded"
+                    id="behaviorHandRaised"
+                    class="bg-sky-100 text-sky-800 px-2 py-1 rounded"
+                    >0 คน</span
+                  >
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                  <span class="text-gray-600">ยืน/ลุก</span>
+                  <span
+                    id="behaviorStanding"
+                    class="bg-purple-100 text-purple-800 px-2 py-1 rounded"
+                    >0 คน</span
+                  >
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                  <span class="text-gray-600">ไม่ชัดเจน</span>
+                  <span
+                    id="behaviorUnknown"
+                    class="bg-gray-100 text-gray-700 px-2 py-1 rounded"
                     >0 คน</span
                   >
                 </div>
@@ -345,6 +354,33 @@
                       style="width: 0%"
                     ></div>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Behavior Pie Chart -->
+            <div class="bg-white rounded-xl shadow-lg p-6">
+              <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                สัดส่วนพฤติกรรม
+              </h3>
+              <div class="h-56 sm:h-64 lg:h-56 xl:h-64">
+                <canvas id="behaviorPieChart"></canvas>
+              </div>
+            </div>
+
+            <!-- Activity Timeline -->
+            <div class="bg-white rounded-xl shadow-lg p-6">
+              <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                กิจกรรมล่าสุด
+              </h3>
+              <div
+                id="activityList"
+                class="space-y-3 max-h-52 lg:max-h-72 overflow-y-auto pr-1"
+              >
+                <div class="flex items-center space-x-3 text-sm">
+                  <div class="w-2 h-2 bg-gray-400 rounded-full"></div>
+                  <span class="text-gray-600">--:--</span>
+                  <span>รอข้อมูล...</span>
                 </div>
               </div>
             </div>
@@ -430,13 +466,21 @@
                     >- คน</span
                   >
                 </div>
-                <div
-                  class="flex justify-between bg-yellow-50 px-3 py-1 rounded"
-                >
-                  <span class="text-gray-600">มองออก</span>
-                  <span
-                    class="font-medium text-yellow-700"
-                    id="reportLookingAway"
+                <div class="flex justify-between bg-sky-50 px-3 py-1 rounded">
+                  <span class="text-gray-600">ยกมือ</span>
+                  <span class="font-medium text-sky-700" id="reportHandRaised"
+                    >- คน</span
+                  >
+                </div>
+                <div class="flex justify-between bg-purple-50 px-3 py-1 rounded">
+                  <span class="text-gray-600">ยืน/ลุก</span>
+                  <span class="font-medium text-purple-700" id="reportStanding"
+                    >- คน</span
+                  >
+                </div>
+                <div class="flex justify-between bg-gray-100 px-3 py-1 rounded">
+                  <span class="text-gray-600">ไม่ชัดเจน</span>
+                  <span class="font-medium text-gray-700" id="reportUnknown"
                     >- คน</span
                   >
                 </div>
@@ -491,7 +535,7 @@
     <!-- Toast notification container -->
     <div
       id="toastContainer"
-      class="fixed top-4 right-4 z-50 space-y-2 max-w-sm pointer-events-none"
+      class="fixed bottom-4 left-4 z-50 space-y-2 w-[calc(100%-2rem)] max-w-sm pointer-events-none sm:w-auto"
     ></div>
   </body>
 </html>

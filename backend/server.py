@@ -66,6 +66,7 @@ detection_lock = threading.Lock()
 # 📊 เก็บสถิติย้อนหลัง
 stats_history = {}  # {lab_id: deque of stats}
 activity_log = {}   # {lab_id: deque of activities}
+session_names = {}  # {lab_id: display name from frontend}
 MAX_HISTORY = 30
 state_lock = threading.RLock()
 
@@ -94,6 +95,7 @@ if not VIDEO_SOURCE_DIRS:
     VIDEO_SOURCE_DIRS = [os.path.abspath(os.path.join(_base_dir, "video_sources"))]
 MAX_WEBCAM_INDEX = _env_int("CLASSMOOD_MAX_WEBCAM_INDEX", 9)
 MAX_VIDEO_UPLOAD_MB = max(1, _env_int("CLASSMOOD_MAX_VIDEO_UPLOAD_MB", 512))
+ANNOTATED_STREAM_FPS = min(5, max(1, _env_int("CLASSMOOD_ANNOTATED_STREAM_FPS", 5)))
 VIDEO_UPLOAD_DIR = VIDEO_SOURCE_DIRS[0]
 app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_UPLOAD_MB * 1024 * 1024
 
@@ -373,6 +375,40 @@ def _get_or_analyze(lab_id, cam_id, frame=None):
         return analysis, True, None
 
 
+def _annotate_count_frame(frame):
+    with detection_lock:
+        results = model(frame)
+    annotated_frame = results[0].plot()
+    boxes = results[0].boxes
+    people = 0
+    if boxes is not None:
+        for box in boxes:
+            if int(box.cls[0]) == 0:
+                people += 1
+
+    h, w = annotated_frame.shape[:2]
+    hud = f"People detected: {people}"
+    cv2.rectangle(annotated_frame, (0, h - 32), (w, h), (30, 30, 30), cv2.FILLED)
+    cv2.putText(
+        annotated_frame,
+        hud,
+        (8, h - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (220, 220, 220),
+        1,
+    )
+    return annotated_frame
+
+
+def _annotate_stream_frame(frame, mode):
+    if mode == "behavior":
+        analysis = analyze_frame(frame)
+        annotated_frame = analysis.get("annotated_frame")
+        return annotated_frame if annotated_frame is not None else frame
+    return _annotate_count_frame(frame)
+
+
 def _push_alert_unlocked(lab_id, alert_type, message):
     _alert_id_ctr[0] += 1
     alerts_list.append({
@@ -384,6 +420,18 @@ def _push_alert_unlocked(lab_id, alert_type, message):
     })
     if len(alerts_list) > 50:
         alerts_list.pop(0)
+
+
+def _set_session_name(lab_id, name):
+    clean_name = str(name or "").strip()
+    if clean_name:
+        session_names[lab_id] = clean_name[:80]
+    else:
+        session_names.setdefault(lab_id, lab_id)
+
+
+def _session_label(lab_id):
+    return session_names.get(lab_id) or lab_id
 
 
 def push_alert(lab_id, alert_type, message):
@@ -399,6 +447,7 @@ def save_stats():
             payload = {
                 "stats_history": {k: list(v) for k, v in stats_history.items()},
                 "activity_log":  {k: list(v) for k, v in activity_log.items()},
+                "session_names": dict(session_names),
             }
             with open(STATS_FILE, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -418,8 +467,10 @@ def load_stats():
                 stats_history[lab_id] = deque(items, maxlen=MAX_HISTORY)
             for lab_id, items in data.get("activity_log", {}).items():
                 activity_log[lab_id] = deque(items, maxlen=20)
+            session_names.update(data.get("session_names", {}))
             for lab_id in stats_history:
                 activity_log.setdefault(lab_id, deque(maxlen=20))
+                session_names.setdefault(lab_id, lab_id)
         print(f"📂 โหลดข้อมูลเดิม: {list(data.get('stats_history', {}).keys())}")
     except Exception as e:
         print(f"⚠️ โหลดข้อมูลเดิมล้มเหลว: {e}")
@@ -524,6 +575,7 @@ def get_stats_history(lab_id):
     if not history:
         return jsonify({
             "lab_id": lab_id,
+            "session_name": _session_label(lab_id),
             "history": [],
             "labels": []
         })
@@ -537,6 +589,7 @@ def get_stats_history(lab_id):
     
     return jsonify({
         "lab_id": lab_id,
+        "session_name": _session_label(lab_id),
         "labels": labels,
         "attention_rates": attention_rates,
         "people_counts": people_counts,
@@ -551,10 +604,15 @@ def get_activities(lab_id):
         activities = list(activity_log.get(lab_id, []))
 
     if not activities:
-        return jsonify({"lab_id": lab_id, "activities": []})
+        return jsonify({
+            "lab_id": lab_id,
+            "session_name": _session_label(lab_id),
+            "activities": [],
+        })
     
     return jsonify({
         "lab_id": lab_id,
+        "session_name": _session_label(lab_id),
         "activities": activities
     })
 
@@ -569,6 +627,7 @@ def record_stats(lab_id, analysis):
     looking_down = summary.get("looking_down", 0)
 
     with state_lock:
+        session_label = _session_label(lab_id)
         if lab_id not in stats_history:
             stats_history[lab_id] = deque(maxlen=MAX_HISTORY)
         if lab_id not in activity_log:
@@ -583,19 +642,19 @@ def record_stats(lab_id, analysis):
 
         # • แจ้งเตือนนักศึกษาหลับ
         if sleeping > 0:
-            msg = f"⚠️ รอบวิเคราะห์ {lab_id}: ตรวจพบนักศึกษาหลับ {sleeping} คน"
+            msg = f"รอบวิเคราะห์ {session_label}: ตรวจพบนักศึกษาหลับ {sleeping} คน"
             activity_log[lab_id].appendleft({"time": time_str, "type": "warning", "message": msg})
             _push_alert_unlocked(lab_id, "warning", msg)
 
         # • แจ้งเตือนความตั้งใจต่ำ
         if analysis["attention_rate"] < 50 and analysis["total_people"] > 0:
-            msg = f"🔴 รอบวิเคราะห์ {lab_id}: ความตั้งใจต่ำ ({analysis['attention_rate']}%)"
+            msg = f"รอบวิเคราะห์ {session_label}: ความตั้งใจต่ำ ({analysis['attention_rate']}%)"
             activity_log[lab_id].appendleft({"time": time_str, "type": "alert", "message": msg})
             _push_alert_unlocked(lab_id, "alert", msg)
 
         # • แจ้งเตือนถือโทรศัพท์จำนวนมาก
         if looking_down >= 3:
-            msg = f"📱 รอบวิเคราะห์ {lab_id}: นักศึกษาก้มหน้า/โทรศัพท์ {looking_down} คน"
+            msg = f"รอบวิเคราะห์ {session_label}: นักศึกษาก้มหน้า/โทรศัพท์ {looking_down} คน"
             _push_alert_unlocked(lab_id, "info", msg)
 
     # • บันทึกลง disk
@@ -616,6 +675,7 @@ def export_lab_data(lab_id):
 
     return jsonify({
         "lab_id": lab_id,
+        "session_name": _session_label(lab_id),
         "export_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "summary": {
             "avg_attention_rate": avg_attention,
@@ -625,7 +685,8 @@ def export_lab_data(lab_id):
             "latest_attention_rate": latest["attention_rate"] if latest else 0,
             "latest_total_people": latest["total_people"] if latest else 0,
             "latest_summary": latest["summary"] if latest else {
-                "attentive": 0, "sleeping": 0, "looking_down": 0, "looking_away": 0
+                "attentive": 0, "sleeping": 0, "looking_down": 0,
+                "hand_raised": 0, "standing": 0, "unknown": 0
             }
         },
         "history": history,
@@ -692,11 +753,56 @@ def _gen_mjpeg(lab_id, cam_id):
         time.sleep(1 / 25)
 
 
+def _gen_annotated_mjpeg(lab_id, cam_id, mode):
+    """Generator สำหรับ MJPEG stream ที่วาด annotation แล้ว"""
+    idle = 0
+    delay = 1 / ANNOTATED_STREAM_FPS
+    mode = "behavior" if mode == "behavior" else "count"
+
+    while True:
+        buf_state = frame_buffers.get((lab_id, cam_id))
+        if not buf_state:
+            break
+
+        frame = get_live_frame(lab_id, cam_id)
+        if frame is None:
+            time.sleep(0.05)
+            idle += 1
+            if idle > 100:
+                print(f"⏱️ annotated stream หมดเวลารอ frame: {lab_id}/{cam_id}")
+                break
+            continue
+
+        idle = 0
+        try:
+            annotated_frame = _annotate_stream_frame(frame, mode)
+        except Exception as e:
+            print(f"⚠️ annotated stream วิเคราะห์เฟรมไม่สำเร็จ: {e}")
+            annotated_frame = frame
+
+        _, buf = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
+
+        if buf_state.get("ended"):
+            break
+        time.sleep(delay)
+
+
 @app.route("/api/stream/<lab_id>/<int:cam_id>")
 def stream_camera(lab_id, cam_id):
     """MJPEG streaming endpoint — browser แสดงผลแบบ live"""
     return Response(
         _gen_mjpeg(lab_id, cam_id),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.route("/api/annotated-stream/<lab_id>/<int:cam_id>")
+def stream_annotated_camera(lab_id, cam_id):
+    """MJPEG stream ที่วาดกรอบตรวจจับหรือ pose annotation"""
+    mode = request.args.get("mode", "behavior").strip().lower()
+    return Response(
+        _gen_annotated_mjpeg(lab_id, cam_id, mode),
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -785,6 +891,7 @@ def set_source(lab_id, cam_id):
     source = body.get("source")
     if source is None:
         return jsonify({"error": "Missing 'source' field"}), 400
+    _set_session_name(lab_id, body.get("session_name"))
 
     source, source_error = _normalize_video_source(source)
     if source_error:
@@ -803,6 +910,7 @@ def set_source(lab_id, cam_id):
         "ok": True,
         "lab_id": lab_id,
         "cam_id": cam_id,
+        "session_name": _session_label(lab_id),
         "source": source,
         "source_type": _source_type(source),
     })

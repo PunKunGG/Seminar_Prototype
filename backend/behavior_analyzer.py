@@ -68,6 +68,8 @@ _KP_IDX = dict(
     left_elbow=7,     right_elbow=8,
     left_wrist=9,     right_wrist=10,
     left_hip=11,      right_hip=12,
+    left_knee=13,     right_knee=14,
+    left_ankle=15,    right_ankle=16,
 )
 
 def _get(kp, name):
@@ -84,6 +86,44 @@ def _midpoint(a, b):
 def _dist(a, b):
     return float(np.linalg.norm(a - b)) if (a is not None and b is not None) else None
 
+def _angle(a, b, c):
+    if a is None or b is None or c is None:
+        return None
+
+    v1 = a - b
+    v2 = c - b
+    denom = float(np.linalg.norm(v1) * np.linalg.norm(v2))
+    if denom <= 1e-6:
+        return None
+
+    cos_val = float(np.dot(v1, v2) / denom)
+    cos_val = max(-1.0, min(1.0, cos_val))
+    return float(np.degrees(np.arccos(cos_val)))
+
+def _standing_leg_votes(legs, shoulder_width):
+    votes = 0
+    for hip, knee, ankle in legs:
+        knee_angle = _angle(hip, knee, ankle)
+        if knee_angle is None:
+            continue
+
+        leg_span = (ankle[1] - hip[1]) / shoulder_width
+        upper_dy = (knee[1] - hip[1]) / shoulder_width
+        lower_dy = (ankle[1] - knee[1]) / shoulder_width
+        upper_dx = abs(knee[0] - hip[0]) / shoulder_width
+        lower_dx = abs(ankle[0] - knee[0]) / shoulder_width
+
+        if (
+            knee_angle >= 150
+            and leg_span > 1.45
+            and upper_dy > 0.50
+            and lower_dy > 0.55
+            and upper_dx < 0.85
+            and lower_dx < 0.85
+        ):
+            votes += 1
+    return votes
+
 
 # ──────────────────────────────────────────────
 # Multi-signal scoring
@@ -99,9 +139,12 @@ def _score_behavior(kp) -> dict:
       S4  Ear symmetry           (เห็นสองหู vs หูเดียว)
       S5  Wrist-to-face proximity (ถือโทรศัพท์)
       S6  Elbow raised           (วางข้อศอกสูง)
+      S7  Wrist above shoulder   (ยกมือ)
+      S8  Full-body verticality   (ยืน/ลุก)
     """
     scores = {"attentive": 0.0, "looking_down": 0.0,
-              "sleeping": 0.0, "looking_away": 0.0}
+              "sleeping": 0.0, "hand_raised": 0.0,
+              "standing": 0.0}
 
     nose           = _get(kp, "nose")
     left_eye       = _get(kp, "left_eye")
@@ -114,9 +157,14 @@ def _score_behavior(kp) -> dict:
     right_elbow    = _get(kp, "right_elbow")
     left_hip       = _get(kp, "left_hip")
     right_hip      = _get(kp, "right_hip")
+    left_knee      = _get(kp, "left_knee")
+    right_knee     = _get(kp, "right_knee")
+    left_ankle     = _get(kp, "left_ankle")
+    right_ankle    = _get(kp, "right_ankle")
 
     shoulder_center = _midpoint(left_shoulder, right_shoulder)
     hip_center      = _midpoint(left_hip, right_hip)
+    ankle_center    = _midpoint(left_ankle, right_ankle)
     shoulder_width  = (_dist(left_shoulder, right_shoulder) or 80.0)
 
     # ── S1: Head elevation ratio ─────────────────────────────────
@@ -146,13 +194,27 @@ def _score_behavior(kp) -> dict:
         elif trunk_dy < -20:      # ตั้งตรงดี
             scores["attentive"] += 1.0
 
+        torso_ratio = (hip_center[1] - shoulder_center[1]) / shoulder_width
+        if ankle_center is not None:
+            body_ratio = (ankle_center[1] - shoulder_center[1]) / shoulder_width
+            standing_votes = _standing_leg_votes(
+                [(left_hip, left_knee, left_ankle),
+                 (right_hip, right_knee, right_ankle)],
+                shoulder_width,
+            )
+            strong_two_leg = standing_votes >= 2 and body_ratio > 3.05
+            strong_one_leg = standing_votes >= 1 and body_ratio > 3.45
+            if torso_ratio > 0.80 and (strong_two_leg or strong_one_leg):
+                scores["standing"]  += 3.0
+                scores["attentive"] -= 0.75
+
     # ── S3: Eye separation ratio ─────────────────────────────────
     eye_dist = _dist(left_eye, right_eye)
     if eye_dist is not None:
         eye_ratio = eye_dist / shoulder_width
-        if   eye_ratio > 0.25:   scores["attentive"]    += 2.0  # หน้าตรง
-        elif eye_ratio > 0.12:   scores["attentive"]    += 0.5
-        else:                    scores["looking_away"] += 1.5  # หันข้าง
+        if   eye_ratio > 0.25:   scores["attentive"] += 2.0  # หน้าตรง
+        elif eye_ratio > 0.12:   scores["attentive"] += 0.5
+        else:                    scores["attentive"] += 0.25  # หันข้างไม่แยกเป็นพฤติกรรม
 
     # ── S4: Ear symmetry ─────────────────────────────────────────
     left_ear_conf  = float(kp[3][2]) if len(kp) > 3 else 0.0
@@ -161,14 +223,21 @@ def _score_behavior(kp) -> dict:
                  right_ear_conf >= KP_CONF_THRESHOLD)
     one_ear   = ((left_ear_conf  >= KP_CONF_THRESHOLD) ^
                  (right_ear_conf >= KP_CONF_THRESHOLD))
-    if both_ears: scores["attentive"]    += 1.0
-    elif one_ear: scores["looking_away"] += 1.0
+    if both_ears: scores["attentive"] += 1.0
+    elif one_ear: scores["attentive"] += 0.25
 
     # ── S5: Wrist-to-face proximity (phone detection) ────────────
     face_center = nose if nose is not None else _midpoint(left_eye, right_eye)
     if face_center is not None:
-        for wrist in [left_wrist, right_wrist]:
+        for wrist, shoulder in [(left_wrist, left_shoulder),
+                                (right_wrist, right_shoulder)]:
             if wrist is not None:
+                raised = (
+                    shoulder is not None
+                    and wrist[1] < shoulder[1] - (0.25 * shoulder_width)
+                )
+                if raised:
+                    continue
                 wr = (_dist(wrist, face_center) or 9999) / shoulder_width
                 if   wr < 0.6:   # wrist ใกล้หน้ามาก = ถือโทรศัพท์
                     scores["looking_down"] += 2.0
@@ -176,12 +245,17 @@ def _score_behavior(kp) -> dict:
                 elif wr < 1.0:
                     scores["looking_down"] += 0.5
 
-    # ── S6: Elbow raised ─────────────────────────────────────────
-    for elbow, shoulder in [(left_elbow, left_shoulder),
-                            (right_elbow, right_shoulder)]:
+    # ── S6/S7: Hand raised ───────────────────────────────────────
+    for wrist, elbow, shoulder in [(left_wrist, left_elbow, left_shoulder),
+                                   (right_wrist, right_elbow, right_shoulder)]:
+        if wrist is not None and shoulder is not None:
+            if wrist[1] < shoulder[1] - (0.35 * shoulder_width):
+                scores["hand_raised"] += 3.0
+                scores["attentive"]   += 0.75
+                continue
         if elbow is not None and shoulder is not None:
             if shoulder[1] - elbow[1] > 10:   # ข้อศอกสูงกว่าไหล่
-                scores["looking_down"] += 0.5
+                scores["hand_raised"] += 1.0
 
     # คลิปค่าลบออก
     for k in scores:
@@ -201,25 +275,43 @@ def analyze_pose(keypoints) -> dict:
 
     scores = _score_behavior(keypoints)
     total  = sum(scores.values())
-
-    if total < 1.0:
-        # signal น้อยเกินไป (keypoints ส่วนใหญ่ confidence ต่ำ / คนถูกบดบังมาก)
-        return {"behavior": "unknown", "confidence": 0,
-                "details": {"scores": {k: round(v, 2) for k, v in scores.items()}}}
-
-    best  = max(scores, key=scores.get)
-    best_score = scores[best]
-    confidence = min(97, int(round((best_score / total) * 100)))
-
-    # ถ้าคะแนนชนะไม่ชัดเจน ให้ fallback เป็น attentive (กรณี ambiguous)
-    sorted_vals = sorted(scores.values(), reverse=True)
-    if len(sorted_vals) > 1 and best_score - sorted_vals[1] < 0.5 and best != "attentive":
-        best       = "attentive"
-        confidence = max(40, confidence - 15)
-
     visible_kp = int(sum(
         1 for kp in keypoints if len(kp) >= 3 and kp[2] >= KP_CONF_THRESHOLD
     ))
+
+    def _unknown():
+        return {"behavior": "unknown", "confidence": 0,
+                "details": {
+                    "scores": {k: round(v, 2) for k, v in scores.items()},
+                    "visible_keypoints": visible_kp,
+                }}
+
+    if visible_kp < 6:
+        return _unknown()
+
+    if total < 1.0:
+        # signal น้อยเกินไป (keypoints ส่วนใหญ่ confidence ต่ำ / คนถูกบดบังมาก)
+        return _unknown()
+
+    priority_best = None
+    if scores.get("hand_raised", 0) >= 3.0:
+        priority_best = "hand_raised"
+    elif scores.get("standing", 0) >= 3.0:
+        priority_best = "standing"
+
+    best  = priority_best or max(scores, key=scores.get)
+    best_score = scores[best]
+    confidence = min(97, int(round((best_score / total) * 100)))
+    if priority_best:
+        confidence = max(65, confidence)
+
+    # ถ้าคะแนนชนะไม่ชัดเจน ให้เป็น unknown แทนการเดาเป็น attentive
+    sorted_vals = sorted(scores.values(), reverse=True)
+    margin = best_score - sorted_vals[1] if len(sorted_vals) > 1 else best_score
+    if priority_best is None and len(sorted_vals) > 1 and margin < 0.5 and best != "attentive":
+        return _unknown()
+    if best == "attentive" and (best_score < 2.5 or confidence < 45):
+        return _unknown()
 
     return {
         "behavior":   best,
@@ -259,7 +351,8 @@ def analyze_frame(frame: np.ndarray) -> dict:
         "total_people": 0,
         "behaviors": [],
         "summary": {"attentive": 0, "sleeping": 0,
-                    "looking_down": 0, "looking_away": 0, "unknown": 0},
+                    "looking_down": 0, "hand_raised": 0,
+                    "standing": 0, "unknown": 0},
         "attention_rate": 0,
         "annotated_frame": frame,
     }
@@ -275,7 +368,8 @@ def analyze_frame(frame: np.ndarray) -> dict:
 
     behaviors      = []
     behavior_counts = {"attentive": 0, "sleeping": 0,
-                       "looking_down": 0, "looking_away": 0, "unknown": 0}
+                       "looking_down": 0, "hand_raised": 0,
+                       "standing": 0, "unknown": 0}
 
     for kp in keypoints_data:
         analysis = analyze_pose(kp)
@@ -285,7 +379,7 @@ def analyze_frame(frame: np.ndarray) -> dict:
             behavior_counts[beh] += 1
 
     total_people    = len(behaviors)
-    attentive_count = behavior_counts["attentive"]
+    attentive_count = behavior_counts["attentive"] + behavior_counts["hand_raised"]
     attention_rate  = round((attentive_count / total_people) * 100, 1) if total_people else 0
 
     # ── Annotated frame ──────────────────────────────────────────
@@ -295,7 +389,8 @@ def analyze_frame(frame: np.ndarray) -> dict:
         "attentive":    ( 50, 205,  50),  # เขียว
         "sleeping":     (  0,   0, 220),  # แดง
         "looking_down": (  0, 140, 255),  # ส้ม
-        "looking_away": (  0, 200, 200),  # เหลือง
+        "hand_raised":  (235, 180,  20),  # ฟ้า
+        "standing":     (170,  80, 210),  # ม่วง
         "unknown":      (180, 180, 180),  # เทา
     }
 
@@ -303,7 +398,7 @@ def analyze_frame(frame: np.ndarray) -> dict:
         for box, beh in zip(boxes, behaviors):
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             color  = _COLOR.get(beh["behavior"], (180, 180, 180))
-            label  = get_behavior_label_th(beh["behavior"])
+            label  = get_behavior_label_en(beh["behavior"])
             conf_t = beh["confidence"]
 
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
@@ -322,7 +417,9 @@ def analyze_frame(frame: np.ndarray) -> dict:
     hud = (f"Attention {attention_rate}%  |  "
            f"Students: {total_people}  |  "
            f"Sleeping: {behavior_counts['sleeping']}  |  "
-           f"Phone/Down: {behavior_counts['looking_down']}")
+           f"Phone/Down: {behavior_counts['looking_down']}  |  "
+           f"Raised: {behavior_counts['hand_raised']}  |  "
+           f"Standing: {behavior_counts['standing']}")
     cv2.rectangle(annotated_frame, (0, h - 32), (w, h), (30, 30, 30), cv2.FILLED)
     cv2.putText(annotated_frame, hud, (8, h - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
@@ -344,7 +441,8 @@ def get_behavior_label_th(behavior: str) -> str:
         "attentive":    "ตั้งใจเรียน",
         "sleeping":     "หลับ",
         "looking_down": "ก้มหน้า/โทรศัพท์",
-        "looking_away": "มองออก",
+        "hand_raised":  "ยกมือ",
+        "standing":     "ยืน/ลุก",
         "unknown":      "ไม่ทราบ",
     }.get(behavior, behavior)
 
@@ -353,7 +451,8 @@ def get_behavior_label_en(behavior: str) -> str:
     return {
         "attentive":    "Attentive",
         "sleeping":     "Sleeping",
-        "looking_down": "Phone/Looking Down",
-        "looking_away": "Looking Away",
+        "looking_down": "Phone/Down",
+        "hand_raised":  "Hand Raised",
+        "standing":     "Standing",
         "unknown":      "Unknown",
     }.get(behavior, behavior)

@@ -6,7 +6,7 @@
 
 ## สิ่งที่ระบบทำได้
 
-- วิเคราะห์พฤติกรรมจากภาพวิดีโอ เช่น ตั้งใจเรียน หลับ ก้มหน้า/โทรศัพท์ และมองออก
+- วิเคราะห์พฤติกรรมจากภาพวิดีโอ เช่น ตั้งใจเรียน หลับ ก้มหน้า/โทรศัพท์ ยกมือ และยืน/ลุกจากที่นั่ง
 - ใช้ได้ทั้งเว็บแคมและไฟล์วิดีโอ
 - อัปโหลดคลิปผ่านหน้าเว็บได้โดยตรง
 - คลิปวิดีโอจะไม่วนซ้ำ เมื่อคลิปจบ ระบบจะเปิดหน้ารายงานให้อัตโนมัติ
@@ -192,6 +192,7 @@ CLASSMOOD_HOST=127.0.0.1 CLASSMOOD_PORT=5000 python server.py
 | `/api/sources/<session_id>/<source_id>` | POST | ตั้งแหล่งภาพเป็นเว็บแคมหรือคลิป |
 | `/api/sources/<session_id>/<source_id>/status` | GET | เช็กสถานะ source เช่น คลิปจบหรือยัง |
 | `/api/stream/<session_id>/<source_id>` | GET | MJPEG stream สำหรับแสดงภาพในเว็บ |
+| `/api/annotated-stream/<session_id>/<source_id>` | GET | MJPEG stream ที่วาดกรอบตรวจจับหรือ pose annotation |
 | `/api/data/<session_id>/<source_id>` | GET | จำนวนคนและความมั่นใจจาก detection |
 | `/api/behavior/<session_id>/<source_id>` | GET | ผลวิเคราะห์พฤติกรรม |
 | `/api/stats/<session_id>` | GET | ข้อมูลย้อนหลังสำหรับกราฟ |
@@ -212,6 +213,7 @@ CLASSMOOD_HOST=127.0.0.1 CLASSMOOD_PORT=5000 python server.py
 | `CLASSMOOD_VIDEO_DIRS` | `backend/video_sources` | โฟลเดอร์ที่อนุญาตให้ใช้ไฟล์วิดีโอ |
 | `CLASSMOOD_MAX_VIDEO_UPLOAD_MB` | `512` | ขนาดอัปโหลดสูงสุดเป็น MB |
 | `CLASSMOOD_MAX_WEBCAM_INDEX` | `9` | index เว็บแคมสูงสุดที่อนุญาต |
+| `CLASSMOOD_ANNOTATED_STREAM_FPS` | `5` | เฟรมเรตของ stream ที่วาดกรอบตรวจจับ จำกัดสูงสุดที่ 5 |
 | `CLASSMOOD_ALLOW_ANY_VIDEO_PATH` | ปิด | ถ้าเปิด จะยอมรับ path วิดีโอนอกโฟลเดอร์ที่กำหนด |
 | `CLASSMOOD_ALLOW_REMOTE_SOURCE_CONTROL` | ปิด | ถ้าเปิด จะอนุญาตให้เครื่องอื่นตั้ง source ได้ |
 

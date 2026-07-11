@@ -29,6 +29,27 @@ function setConnectionStatus(text, colorClass = "text-gray-500") {
   el.className = `${colorClass} font-medium`;
 }
 
+function cleanUiMessage(value) {
+  const cleaned = String(value ?? "")
+    .replace(/[\u200d\ufe0f]/gi, "")
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (currentLab && currentSessionName) {
+    return cleaned.split(currentLab).join(currentSessionName);
+  }
+  return cleaned;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 async function readResponsePayload(res) {
   const contentType = res.headers.get("content-type") || "";
   if (contentType.includes("application/json")) return res.json();
@@ -71,7 +92,10 @@ function showActiveFeed(src) {
 }
 
 function streamUrlFor(labId, camId) {
-  return apiUrl(`/api/stream/${labId}/${camId}?v=${streamReloadToken}`);
+  const mode = useBehaviorMode ? "behavior" : "count";
+  return apiUrl(
+    `/api/annotated-stream/${labId}/${camId}?mode=${mode}&v=${streamReloadToken}`,
+  );
 }
 
 // 🎥 เริ่มโหลดภาพ + ดึงข้อมูลจาก Flask ทุก 2 วินาที
@@ -108,7 +132,7 @@ async function updateLiveFeed() {
     const data = await dataRes.json();
 
     if (!data || data.error) {
-      detectionCount.textContent = "❌ ไม่พบข้อมูลตรวจจับ";
+      detectionCount.textContent = "ไม่พบข้อมูลตรวจจับ";
       return;
     }
 
@@ -135,14 +159,14 @@ async function updateLiveFeed() {
 
       if (behaviorData && !behaviorData.error) {
         updateBehaviorStats(behaviorData);
-        detectionCount.textContent = `🧠 ตรวจพบ ${behaviorData.total_people} คน | ตั้งใจเรียน ${behaviorData.attention_rate}%`;
+        detectionCount.textContent = `ตรวจพบ ${behaviorData.total_people} คน | ตั้งใจเรียน ${behaviorData.attention_rate}%`;
       }
     } else {
-      detectionCount.textContent = `👥 ตรวจพบ ${data.num_people} คน (เชื่อมั่น ${data.avg_confidence}%)`;
+      detectionCount.textContent = `ตรวจพบ ${data.num_people} คน | เชื่อมั่น ${data.avg_confidence}%`;
     }
   } catch (e) {
     console.error("Error fetching data:", e);
-    detectionCount.textContent = "⚠️ ข้อมูลไม่พร้อม";
+    detectionCount.textContent = "ข้อมูลไม่พร้อม";
   }
 }
 
@@ -151,7 +175,9 @@ function updateBehaviorStats(data) {
   const attentiveEl = document.getElementById("behaviorAttentive");
   const sleepingEl = document.getElementById("behaviorSleeping");
   const lookingDownEl = document.getElementById("behaviorLookingDown");
-  const lookingAwayEl = document.getElementById("behaviorLookingAway");
+  const handRaisedEl = document.getElementById("behaviorHandRaised");
+  const standingEl = document.getElementById("behaviorStanding");
+  const unknownEl = document.getElementById("behaviorUnknown");
   const attentionRateEl = document.getElementById("attentionRate");
   const attentionBarEl = document.getElementById("attentionBar");
 
@@ -161,8 +187,10 @@ function updateBehaviorStats(data) {
     if (sleepingEl) sleepingEl.textContent = `${data.summary.sleeping || 0} คน`;
     if (lookingDownEl)
       lookingDownEl.textContent = `${data.summary.looking_down || 0} คน`;
-    if (lookingAwayEl)
-      lookingAwayEl.textContent = `${data.summary.looking_away || 0} คน`;
+    if (handRaisedEl)
+      handRaisedEl.textContent = `${data.summary.hand_raised || 0} คน`;
+    if (standingEl) standingEl.textContent = `${data.summary.standing || 0} คน`;
+    if (unknownEl) unknownEl.textContent = `${data.summary.unknown || 0} คน`;
   }
 
   if (attentionRateEl) {
@@ -195,22 +223,37 @@ function updateBehaviorStats(data) {
   }
 }
 
-// 🎯 Toggle โหมดวิเคราะห์พฤติกรรม
-function toggleBehaviorMode() {
-  useBehaviorMode = !useBehaviorMode;
-  const btn = document.getElementById("behaviorModeBtn");
-  if (btn) {
-    if (useBehaviorMode) {
-      btn.textContent = "🧠 โหมด: วิเคราะห์พฤติกรรม";
-      btn.className =
-        "bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded-lg text-sm transition-colors";
-    } else {
-      btn.textContent = "👥 โหมด: นับจำนวนคน";
-      btn.className =
-        "bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg text-sm transition-colors";
-    }
+function updateModeToggle() {
+  const behaviorBtn = document.getElementById("behaviorModeBehaviorBtn");
+  const countBtn = document.getElementById("behaviorModeCountBtn");
+  const activeClass =
+    "flex-1 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 shadow-sm transition-colors sm:flex-none";
+  const inactiveClass =
+    "flex-1 rounded-lg px-3 py-1.5 text-sm font-semibold text-white/85 transition-colors hover:bg-white/10 hover:text-white sm:flex-none";
+
+  if (behaviorBtn) {
+    behaviorBtn.className = useBehaviorMode ? activeClass : inactiveClass;
+    behaviorBtn.setAttribute("aria-pressed", String(useBehaviorMode));
+  }
+  if (countBtn) {
+    countBtn.className = useBehaviorMode ? inactiveClass : activeClass;
+    countBtn.setAttribute("aria-pressed", String(!useBehaviorMode));
+  }
+}
+
+function setBehaviorMode(enabled) {
+  useBehaviorMode = Boolean(enabled);
+  updateModeToggle();
+  if (currentLab && isStreamActive(currentLab, currentCamera)) {
+    streamReloadToken += 1;
+    updateCameraFeed();
   }
   updateLiveFeed(); // อัปเดตทันที
+}
+
+// 🎯 Toggle โหมดวิเคราะห์พฤติกรรม
+function toggleBehaviorMode() {
+  setBehaviorMode(!useBehaviorMode);
 }
 
 // ✨ แอนิเมชันเปลี่ยนค่าตัวเลขให้ดู smooth
@@ -285,7 +328,9 @@ function resetDashboardState() {
   setTextIfPresent("behaviorAttentive", "0 คน");
   setTextIfPresent("behaviorSleeping", "0 คน");
   setTextIfPresent("behaviorLookingDown", "0 คน");
-  setTextIfPresent("behaviorLookingAway", "0 คน");
+  setTextIfPresent("behaviorHandRaised", "0 คน");
+  setTextIfPresent("behaviorStanding", "0 คน");
+  setTextIfPresent("behaviorUnknown", "0 คน");
   setTextIfPresent("attentionRate", "0%");
   setTextIfPresent("lastUpdate", "ตอนนี้");
   setConnectionStatus("รอแหล่งภาพ");
@@ -358,12 +403,12 @@ function toggleDarkMode() {
   const isDark = body.classList.contains("dark");
   if (isDark) {
     body.classList.remove("dark");
-    setTextIfPresent("themeIcon", "🌙");
+    setTextIfPresent("themeIcon", "มืด");
     setTextIfPresent("themeText", "โหมดมืด");
     localStorage.setItem("darkMode", "false");
   } else {
     body.classList.add("dark");
-    setTextIfPresent("themeIcon", "☀️");
+    setTextIfPresent("themeIcon", "สว่าง");
     setTextIfPresent("themeText", "โหมดสว่าง");
     localStorage.setItem("darkMode", "true");
   }
@@ -392,7 +437,9 @@ function downloadReport(format) {
       behavior_attentive: latest.attentive || 0,
       behavior_sleeping: latest.sleeping || 0,
       behavior_looking_down: latest.looking_down || 0,
-      behavior_looking_away: latest.looking_away || 0,
+      behavior_hand_raised: latest.hand_raised || 0,
+      behavior_standing: latest.standing || 0,
+      behavior_unknown: latest.unknown || 0,
     };
   } else {
     data = {
@@ -408,7 +455,9 @@ function downloadReport(format) {
       behavior_attentive: 0,
       behavior_sleeping: 0,
       behavior_looking_down: 0,
-      behavior_looking_away: 0,
+      behavior_hand_raised: 0,
+      behavior_standing: 0,
+      behavior_unknown: 0,
     };
   }
 
@@ -466,7 +515,9 @@ function buildCSV(data) {
     ["ตั้งใจเรียน (คน)", data.behavior_attentive],
     ["หลับ (คน)", data.behavior_sleeping],
     ["ก้มหน้า (คน)", data.behavior_looking_down],
-    ["มองออก (คน)", data.behavior_looking_away],
+    ["ยกมือ (คน)", data.behavior_hand_raised],
+    ["ยืน/ลุก (คน)", data.behavior_standing],
+    ["ไม่ชัดเจน (คน)", data.behavior_unknown],
     ["อัตราความตั้งใจล่าสุด (%)", data.latest_attention_rate],
   ];
 
@@ -506,7 +557,9 @@ function buildExcel(data) {
     ["ตั้งใจเรียน (คน)", data.behavior_attentive],
     ["หลับ (คน)", data.behavior_sleeping],
     ["ก้มหน้า (คน)", data.behavior_looking_down],
-    ["มองออก (คน)", data.behavior_looking_away],
+    ["ยกมือ (คน)", data.behavior_hand_raised],
+    ["ยืน/ลุก (คน)", data.behavior_standing],
+    ["ไม่ชัดเจน (คน)", data.behavior_unknown],
     ["อัตราความตั้งใจล่าสุด (%)", data.latest_attention_rate],
   ];
 
@@ -529,11 +582,11 @@ function buildExcel(data) {
 function generatePDF(labId) {
   const reportContent = document.querySelector("#reportModal .bg-white");
   if (!reportContent) {
-    alert("❌ ไม่พบเนื้อหารายงาน");
+    alert("ไม่พบเนื้อหารายงาน");
     return;
   }
   if (typeof html2canvas === "undefined" || !window.jspdf) {
-    alert("❌ ไม่สามารถสร้าง PDF ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต");
+    alert("ไม่สามารถสร้าง PDF ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต");
     return;
   }
 
@@ -607,7 +660,7 @@ function downloadBlob(content, mimeType, filename) {
 // 🔄 รีเฟรชข้อมูล (ภาพ + ตัวเลข)
 function refreshData() {
   if (!currentLab) {
-    alert("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อนรีเฟรช");
+    alert("กรุณาเริ่มรอบวิเคราะห์ก่อนรีเฟรช");
     return;
   }
   updateCameraFeed(); // โหลดภาพใหม่
@@ -619,7 +672,7 @@ function refreshData() {
 // 📊 เปิด modal และดึงข้อมูลจริงจาก backend
 async function exportReport() {
   if (!currentLab) {
-    alert("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อน");
+    alert("กรุณาเริ่มรอบวิเคราะห์ก่อน");
     return;
   }
 
@@ -672,13 +725,15 @@ async function exportReport() {
     set("reportAttentive", `${latest.attentive ?? 0} คน`);
     set("reportSleeping", `${latest.sleeping ?? 0} คน`);
     set("reportLookingDown", `${latest.looking_down ?? 0} คน`);
-    set("reportLookingAway", `${latest.looking_away ?? 0} คน`);
+    set("reportHandRaised", `${latest.hand_raised ?? 0} คน`);
+    set("reportStanding", `${latest.standing ?? 0} คน`);
+    set("reportUnknown", `${latest.unknown ?? 0} คน`);
     set("reportLatestAttention", `${s.latest_attention_rate ?? 0}%`);
   } catch (e) {
     console.error("Error fetching export data:", e);
     latestExportData = null;
     const recEl = document.getElementById("reportRecords");
-    if (recEl) recEl.textContent = "⚠️ ไม่สามารถโหลดข้อมูลได้";
+    if (recEl) recEl.textContent = "ไม่สามารถโหลดข้อมูลได้";
   }
 }
 
@@ -785,15 +840,17 @@ function initCharts() {
     behaviorPieChart = new Chart(pieCtx, {
       type: "doughnut",
       data: {
-        labels: ["ตั้งใจเรียน", "หลับ", "ก้มหน้า/โทรศัพท์", "มองออก"],
+        labels: ["ตั้งใจเรียน", "หลับ", "ก้มหน้า/โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"],
         datasets: [
           {
-            data: [0, 0, 0, 0],
+            data: [0, 0, 0, 0, 0, 0],
             backgroundColor: [
               "rgba(34, 197, 94, 0.8)",
               "rgba(239, 68, 68, 0.8)",
               "rgba(249, 115, 22, 0.8)",
-              "rgba(234, 179, 8, 0.8)",
+              "rgba(14, 165, 233, 0.8)",
+              "rgba(168, 85, 247, 0.8)",
+              "rgba(107, 114, 128, 0.75)",
             ],
             borderWidth: 2,
             borderColor: "#fff",
@@ -841,7 +898,9 @@ async function updateCharts() {
         summary.attentive || 0,
         summary.sleeping || 0,
         summary.looking_down || 0,
-        summary.looking_away || 0,
+        summary.hand_raised || 0,
+        summary.standing || 0,
+        summary.unknown || 0,
       ];
       behaviorPieChart.update("none");
     }
@@ -886,8 +945,8 @@ async function updateActivityLog() {
         return `
         <div class="flex items-center space-x-3 text-sm">
           <div class="w-2 h-2 ${dotColor} rounded-full"></div>
-          <span class="text-gray-600">${activity.time}</span>
-          <span>${activity.message}</span>
+          <span class="text-gray-600">${escapeHtml(activity.time)}</span>
+          <span>${escapeHtml(cleanUiMessage(activity.message))}</span>
         </div>
       `;
       })
@@ -915,10 +974,12 @@ function stopChartUpdates() {
 }
 
 document.addEventListener("DOMContentLoaded", function () {
+  updateModeToggle();
+
   const savedDarkMode = localStorage.getItem("darkMode");
   if (savedDarkMode === "true") {
     document.body.classList.add("dark");
-    setTextIfPresent("themeIcon", "☀️");
+    setTextIfPresent("themeIcon", "สว่าง");
     setTextIfPresent("themeText", "โหมดสว่าง");
   }
 
@@ -1015,8 +1076,7 @@ async function pollAlerts() {
     if (!res.ok) return;
     const data = await res.json();
     for (const alert of data.alerts || []) {
-      const icons = { warning: "⚠️", alert: "🔴", info: "📱" };
-      showToast((icons[alert.type] || "🔔") + " " + alert.message, alert.type);
+      showToast(alert.message, alert.type);
     }
     if (data.latest_id > lastAlertId) lastAlertId = data.latest_id;
   } catch (_) {
@@ -1034,12 +1094,20 @@ function showToast(message, type = "info") {
     success: "bg-green-600",
     info: "bg-blue-500",
   };
+  const labels = {
+    warning: "คำเตือน",
+    alert: "แจ้งเตือน",
+    success: "สำเร็จ",
+    info: "ข้อมูล",
+  };
   const bg = colors[type] || "bg-gray-700";
+  const label = labels[type] || "ข้อความ";
+  const cleanMessage = cleanUiMessage(message);
 
   const toast = document.createElement("div");
   toast.className = `${bg} text-white text-sm font-medium px-4 py-3 rounded-lg shadow-lg
     pointer-events-auto opacity-0 transition-opacity duration-300`;
-  toast.textContent = message;
+  toast.textContent = `${label}: ${cleanMessage}`;
   container.appendChild(toast);
 
   // Fade in
@@ -1069,14 +1137,17 @@ function showToast(message, type = "info") {
  */
 async function setVideoSource(labId, camId, source, displayLabel = null) {
   if (!labId) {
-    showToast("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อน", "warning");
+    showToast("กรุณาเริ่มรอบวิเคราะห์ก่อน", "warning");
     return;
   }
   try {
     const res = await fetch(apiUrl(`/api/sources/${labId}/${camId}`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source }),
+      body: JSON.stringify({
+        source,
+        session_name: currentSessionName || labId,
+      }),
     });
     const data = await readResponsePayload(res);
     if (data.ok) {
@@ -1092,20 +1163,20 @@ async function setVideoSource(labId, camId, source, displayLabel = null) {
       const srcLabel =
         displayLabel || (typeof source === "number" ? `Webcam ${source}` : source);
       setConnectionStatus("เชื่อมต่อแล้ว", "text-green-600");
-      showToast(`✅ เชื่อมต่อสำเร็จ: ${srcLabel}`, "success");
+      showToast(`เชื่อมต่อสำเร็จ: ${srcLabel}`, "success");
       _updateSourceStatus(labId, camId, srcLabel);
       startSourceStatusPolling();
     } else {
       currentSourceType = null;
       stopSourceStatusPolling();
       setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
-      showToast(`❌ เชื่อมต่อไม่สำเร็จ: ${data.error || ""}`, "alert");
+      showToast(`เชื่อมต่อไม่สำเร็จ: ${data.error || ""}`, "alert");
     }
   } catch (e) {
     currentSourceType = null;
     stopSourceStatusPolling();
     setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
-    showToast(`❌ เชื่อมต่อไม่สำเร็จ: ${e.message}`, "alert");
+    showToast(`เชื่อมต่อไม่สำเร็จ: ${e.message}`, "alert");
   }
 }
 
@@ -1134,14 +1205,14 @@ function connectWebcam() {
 
 function connectVideoFile() {
   if (!currentLab) {
-    showToast("⚠️ กรุณาเริ่มรอบวิเคราะห์ก่อน", "warning");
+    showToast("กรุณาเริ่มรอบวิเคราะห์ก่อน", "warning");
     return;
   }
 
   const input = document.getElementById("videoFileInput");
   const file = input?.files?.[0];
   if (!file) {
-    showToast("⚠️ กรุณาเลือกไฟล์วิดีโอก่อน", "warning");
+    showToast("กรุณาเลือกไฟล์วิดีโอก่อน", "warning");
     return;
   }
 
@@ -1168,13 +1239,15 @@ async function uploadAndUseVideo(file) {
     const data = await readResponsePayload(res);
 
     if (!res.ok || !data.ok) {
-      showToast(`❌ อัปโหลดไม่สำเร็จ: ${data.error || res.statusText}`, "alert");
+      showToast(`อัปโหลดไม่สำเร็จ: ${data.error || res.statusText}`, "alert");
       return;
     }
 
     await setVideoSource(currentLab, currentCamera, data.source, data.filename);
+    const input = document.getElementById("videoFileInput");
+    if (input) input.value = "";
   } catch (e) {
-    showToast(`❌ อัปโหลดไม่สำเร็จ: ${e.message}`, "alert");
+    showToast(`อัปโหลดไม่สำเร็จ: ${e.message}`, "alert");
   } finally {
     if (btn) {
       btn.disabled = false;

@@ -29,6 +29,76 @@ function setConnectionStatus(text, colorClass = "text-gray-500") {
   el.className = `${colorClass} font-medium`;
 }
 
+function formatVideoTime(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return [hours, minutes, secs]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
+}
+
+function toWholePeople(value) {
+  return Math.max(0, Math.round(Number(value) || 0));
+}
+
+function formatDecimal(value) {
+  const number = Number(value) || 0;
+  return number.toFixed(1).replace(/\.0$/, "");
+}
+
+function renderReportTimeline(periods = [], periodSeconds = 600) {
+  const section = document.getElementById("reportTimelineSection");
+  const body = document.getElementById("reportTimelineBody");
+  if (!section || !body) return;
+
+  if (!periods.length) {
+    section.classList.add("hidden");
+    body.innerHTML = "";
+    return;
+  }
+
+  section.classList.remove("hidden");
+  setTextIfPresent(
+    "reportTimelineCaption",
+    `ช่วงละ ${Math.round((Number(periodSeconds) || 600) / 60)} นาที`,
+  );
+  body.innerHTML = periods
+    .map((period, index) => {
+      const summary = period.summary || {};
+      const rowClass = index % 2 === 0 ? "bg-white" : "bg-gray-50";
+      return `
+        <tr class="${rowClass}">
+          <td class="px-3 py-2 font-medium text-gray-700 whitespace-nowrap">${escapeHtml(period.label)}</td>
+          <td class="px-3 py-2 text-right">${formatDecimal(period.avg_people)}</td>
+          <td class="px-3 py-2 text-right font-semibold text-green-700">${formatDecimal(period.avg_attention_rate)}%</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.attentive)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.sleeping)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.looking_down)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.hand_raised)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.standing)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.unknown)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function updateAnalysisCadence(sourceData = null) {
+  const sampled = sourceData?.processing_mode === "sampled";
+  setTextIfPresent(
+    "attentionChartTitle",
+    sampled ? "กราฟความตั้งใจเรียน (Timeline)" : "กราฟความตั้งใจเรียน (Real-time)",
+  );
+  setTextIfPresent(
+    "attentionChartCadence",
+    sampled
+      ? `สรุปทุก ${sourceData.sample_interval_seconds || 60} วินาทีของคลิป`
+      : "อัปเดตทุก 2 วินาที",
+  );
+}
+
 function cleanUiMessage(value) {
   const cleaned = String(value ?? "")
     .replace(/[\u200d\ufe0f]/gi, "")
@@ -159,7 +229,7 @@ async function updateLiveFeed() {
 
       if (behaviorData && !behaviorData.error) {
         updateBehaviorStats(behaviorData);
-        detectionCount.textContent = `ตรวจพบ ${behaviorData.total_people} คน | ตั้งใจเรียน ${behaviorData.attention_rate}%`;
+        detectionCount.textContent = `ตรวจพบ ${toWholePeople(behaviorData.total_people)} คน | ตั้งใจเรียน ${behaviorData.attention_rate}%`;
       }
     } else {
       detectionCount.textContent = `ตรวจพบ ${data.num_people} คน | เชื่อมั่น ${data.avg_confidence}%`;
@@ -183,14 +253,17 @@ function updateBehaviorStats(data) {
 
   if (data.summary) {
     if (attentiveEl)
-      attentiveEl.textContent = `${data.summary.attentive || 0} คน`;
-    if (sleepingEl) sleepingEl.textContent = `${data.summary.sleeping || 0} คน`;
+      attentiveEl.textContent = `${toWholePeople(data.summary.attentive)} คน`;
+    if (sleepingEl)
+      sleepingEl.textContent = `${toWholePeople(data.summary.sleeping)} คน`;
     if (lookingDownEl)
-      lookingDownEl.textContent = `${data.summary.looking_down || 0} คน`;
+      lookingDownEl.textContent = `${toWholePeople(data.summary.looking_down)} คน`;
     if (handRaisedEl)
-      handRaisedEl.textContent = `${data.summary.hand_raised || 0} คน`;
-    if (standingEl) standingEl.textContent = `${data.summary.standing || 0} คน`;
-    if (unknownEl) unknownEl.textContent = `${data.summary.unknown || 0} คน`;
+      handRaisedEl.textContent = `${toWholePeople(data.summary.hand_raised)} คน`;
+    if (standingEl)
+      standingEl.textContent = `${toWholePeople(data.summary.standing)} คน`;
+    if (unknownEl)
+      unknownEl.textContent = `${toWholePeople(data.summary.unknown)} คน`;
   }
 
   if (attentionRateEl) {
@@ -318,6 +391,7 @@ function resetDashboardState() {
   currentSourceType = null;
   autoReportShown = false;
   activeSources.clear();
+  updateAnalysisCadence();
   _updateSourceStatus(null, null, null);
   showFeedPlaceholder();
 
@@ -424,6 +498,8 @@ function downloadReport(format) {
   if (latestExportData) {
     const s = latestExportData.summary || {};
     const latest = s.latest_summary || {};
+    const hasPeriods = (latestExportData.periods || []).length > 0;
+    const reportBehavior = hasPeriods ? s.overall_summary || latest : latest;
     data = {
       lab_id: latestExportData.lab_id,
       session_name: currentSessionName || latestExportData.lab_id,
@@ -433,13 +509,20 @@ function downloadReport(format) {
       max_people: s.max_people,
       total_records: s.total_records,
       latest_attention_rate: s.latest_attention_rate,
+      report_attention_label: hasPeriods
+        ? "อัตราความตั้งใจเฉลี่ย (%)"
+        : "อัตราความตั้งใจล่าสุด (%)",
+      report_attention_rate: hasPeriods
+        ? s.avg_attention_rate
+        : s.latest_attention_rate,
       latest_total_people: s.latest_total_people,
-      behavior_attentive: latest.attentive || 0,
-      behavior_sleeping: latest.sleeping || 0,
-      behavior_looking_down: latest.looking_down || 0,
-      behavior_hand_raised: latest.hand_raised || 0,
-      behavior_standing: latest.standing || 0,
-      behavior_unknown: latest.unknown || 0,
+      behavior_scope: hasPeriods ? "ภาพรวมพฤติกรรม" : "พฤติกรรมล่าสุด",
+      behavior_attentive: reportBehavior.attentive || 0,
+      behavior_sleeping: reportBehavior.sleeping || 0,
+      behavior_looking_down: reportBehavior.looking_down || 0,
+      behavior_hand_raised: reportBehavior.hand_raised || 0,
+      behavior_standing: reportBehavior.standing || 0,
+      behavior_unknown: reportBehavior.unknown || 0,
     };
   } else {
     data = {
@@ -451,6 +534,8 @@ function downloadReport(format) {
       max_people: 0,
       total_records: 0,
       latest_attention_rate: 0,
+      report_attention_label: "อัตราความตั้งใจล่าสุด (%)",
+      report_attention_rate: 0,
       latest_total_people: 0,
       behavior_attentive: 0,
       behavior_sleeping: 0,
@@ -458,6 +543,7 @@ function downloadReport(format) {
       behavior_hand_raised: 0,
       behavior_standing: 0,
       behavior_unknown: 0,
+      behavior_scope: "พฤติกรรมล่าสุด",
     };
   }
 
@@ -511,15 +597,41 @@ function buildCSV(data) {
     ["นักเรียนสูงสุด (คน)", data.max_people],
     ["จำนวนบันทึกทั้งหมด", data.total_records],
     [],
-    ["พฤติกรรมล่าสุด"],
+    [data.behavior_scope || "พฤติกรรมล่าสุด"],
     ["ตั้งใจเรียน (คน)", data.behavior_attentive],
     ["หลับ (คน)", data.behavior_sleeping],
     ["ก้มหน้า (คน)", data.behavior_looking_down],
     ["ยกมือ (คน)", data.behavior_hand_raised],
     ["ยืน/ลุก (คน)", data.behavior_standing],
     ["ไม่ชัดเจน (คน)", data.behavior_unknown],
-    ["อัตราความตั้งใจล่าสุด (%)", data.latest_attention_rate],
+    [
+      data.report_attention_label || "อัตราความตั้งใจล่าสุด (%)",
+      data.report_attention_rate ?? data.latest_attention_rate,
+    ],
   ];
+
+  if ((latestExportData?.periods || []).length > 0) {
+    rows.push([]);
+    rows.push(["สรุปตามช่วงเวลา"]);
+    rows.push([
+      "ช่วงในคลิป", "คนเฉลี่ย", "ความตั้งใจ (%)", "ตั้งใจเรียน",
+      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+    ]);
+    for (const period of latestExportData.periods) {
+      const summary = period.summary || {};
+      rows.push([
+        period.label,
+        period.avg_people,
+        period.avg_attention_rate,
+        toWholePeople(summary.attentive),
+        toWholePeople(summary.sleeping),
+        toWholePeople(summary.looking_down),
+        toWholePeople(summary.hand_raised),
+        toWholePeople(summary.standing),
+        toWholePeople(summary.unknown),
+      ]);
+    }
+  }
 
   // เพิ่มข้อมูลย้อนหลัง
   if (
@@ -529,9 +641,23 @@ function buildCSV(data) {
   ) {
     rows.push([]);
     rows.push(["ข้อมูลย้อนหลัง"]);
-    rows.push(["เวลา", "ความตั้งใจ (%)", "จำนวนคน"]);
+    rows.push([
+      "เวลา", "ความตั้งใจ (%)", "จำนวนคน", "ตั้งใจเรียน",
+      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+    ]);
     for (const h of latestExportData.history) {
-      rows.push([h.time, h.attention_rate, h.total_people]);
+      const summary = h.summary || {};
+      rows.push([
+        h.time,
+        h.attention_rate,
+        h.total_people,
+        toWholePeople(summary.attentive),
+        toWholePeople(summary.sleeping),
+        toWholePeople(summary.looking_down),
+        toWholePeople(summary.hand_raised),
+        toWholePeople(summary.standing),
+        toWholePeople(summary.unknown),
+      ]);
     }
   }
 
@@ -554,14 +680,41 @@ function buildExcel(data) {
     ["นักเรียนสูงสุด (คน)", data.max_people],
     ["จำนวนบันทึก", data.total_records],
     [],
+    [data.behavior_scope || "พฤติกรรมล่าสุด"],
     ["ตั้งใจเรียน (คน)", data.behavior_attentive],
     ["หลับ (คน)", data.behavior_sleeping],
     ["ก้มหน้า (คน)", data.behavior_looking_down],
     ["ยกมือ (คน)", data.behavior_hand_raised],
     ["ยืน/ลุก (คน)", data.behavior_standing],
     ["ไม่ชัดเจน (คน)", data.behavior_unknown],
-    ["อัตราความตั้งใจล่าสุด (%)", data.latest_attention_rate],
+    [
+      data.report_attention_label || "อัตราความตั้งใจล่าสุด (%)",
+      data.report_attention_rate ?? data.latest_attention_rate,
+    ],
   ];
+
+  if ((latestExportData?.periods || []).length > 0) {
+    rows.push([]);
+    rows.push(["สรุปตามช่วงเวลา"]);
+    rows.push([
+      "ช่วงในคลิป", "คนเฉลี่ย", "ความตั้งใจ (%)", "ตั้งใจเรียน",
+      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+    ]);
+    for (const period of latestExportData.periods) {
+      const summary = period.summary || {};
+      rows.push([
+        period.label,
+        period.avg_people,
+        period.avg_attention_rate,
+        toWholePeople(summary.attentive),
+        toWholePeople(summary.sleeping),
+        toWholePeople(summary.looking_down),
+        toWholePeople(summary.hand_raised),
+        toWholePeople(summary.standing),
+        toWholePeople(summary.unknown),
+      ]);
+    }
+  }
 
   if (
     latestExportData &&
@@ -569,9 +722,23 @@ function buildExcel(data) {
     latestExportData.history.length > 0
   ) {
     rows.push([]);
-    rows.push(["เวลา", "ความตั้งใจ (%)", "จำนวนคน"]);
+    rows.push([
+      "เวลา", "ความตั้งใจ (%)", "จำนวนคน", "ตั้งใจเรียน",
+      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+    ]);
     for (const h of latestExportData.history) {
-      rows.push([h.time, h.attention_rate, h.total_people]);
+      const summary = h.summary || {};
+      rows.push([
+        h.time,
+        h.attention_rate,
+        h.total_people,
+        toWholePeople(summary.attentive),
+        toWholePeople(summary.sleeping),
+        toWholePeople(summary.looking_down),
+        toWholePeople(summary.hand_raised),
+        toWholePeople(summary.standing),
+        toWholePeople(summary.unknown),
+      ]);
     }
   }
 
@@ -590,12 +757,38 @@ function generatePDF(labId) {
     return;
   }
 
-  // ซ่อนส่วนปุ่มดาวน์โหลดขณะ capture เพื่อไม่ให้ติดใน PDF
-  const dlSection = reportContent.querySelector(".space-y-3");
-  if (dlSection) dlSection.style.visibility = "hidden";
+  const dlSection = document.getElementById("reportDownloadActions");
+  const closeButton = document.getElementById("reportCloseButton");
+  const timelineWrapper = document.getElementById("reportTimelineTableWrapper");
+  const savedStyles = {
+    maxHeight: reportContent.style.maxHeight,
+    overflow: reportContent.style.overflow,
+    width: reportContent.style.width,
+    maxWidth: reportContent.style.maxWidth,
+    actionsDisplay: dlSection?.style.display || "",
+    closeDisplay: closeButton?.style.display || "",
+    timelineOverflow: timelineWrapper?.style.overflow || "",
+  };
+  const restoreReportLayout = () => {
+    reportContent.style.maxHeight = savedStyles.maxHeight;
+    reportContent.style.overflow = savedStyles.overflow;
+    reportContent.style.width = savedStyles.width;
+    reportContent.style.maxWidth = savedStyles.maxWidth;
+    if (dlSection) dlSection.style.display = savedStyles.actionsDisplay;
+    if (closeButton) closeButton.style.display = savedStyles.closeDisplay;
+    if (timelineWrapper) timelineWrapper.style.overflow = savedStyles.timelineOverflow;
+  };
+
+  reportContent.style.maxHeight = "none";
+  reportContent.style.overflow = "visible";
+  reportContent.style.width = "1024px";
+  reportContent.style.maxWidth = "1024px";
+  if (dlSection) dlSection.style.display = "none";
+  if (closeButton) closeButton.style.display = "none";
+  if (timelineWrapper) timelineWrapper.style.overflow = "visible";
 
   html2canvas(reportContent, { scale: 2, useCORS: true }).then((canvas) => {
-    if (dlSection) dlSection.style.visibility = "";
+    restoreReportLayout();
 
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF("p", "mm", "a4");
@@ -642,6 +835,10 @@ function generatePDF(labId) {
     }
 
     pdf.save(`ClassMood_Report_${labId}_${Date.now()}.pdf`);
+  }).catch((error) => {
+    restoreReportLayout();
+    console.error("Error generating PDF:", error);
+    alert("ไม่สามารถสร้าง PDF ได้");
   });
 }
 
@@ -678,6 +875,7 @@ async function exportReport() {
 
   const modal = document.getElementById("reportModal");
   if (modal) modal.classList.remove("hidden");
+  renderReportTimeline([]);
 
   // ชื่อรอบ
   const labName =
@@ -709,6 +907,11 @@ async function exportReport() {
 
     const s = latestExportData.summary || {};
     const latest = s.latest_summary || {};
+    const periods = latestExportData.periods || [];
+    const isTimelineReport = periods.length > 0;
+    const reportBehavior = isTimelineReport
+      ? s.overall_summary || latest
+      : latest;
 
     const set = (id, text) => {
       const el = document.getElementById(id);
@@ -721,17 +924,30 @@ async function exportReport() {
       "reportAvgAttention",
       `ความตั้งใจเฉลี่ย: ${s.avg_attention_rate ?? 0}%`,
     );
-    set("reportMaxPeople", `นักเรียนสูงสุด: ${s.max_people ?? 0} คน`);
-    set("reportAttentive", `${latest.attentive ?? 0} คน`);
-    set("reportSleeping", `${latest.sleeping ?? 0} คน`);
-    set("reportLookingDown", `${latest.looking_down ?? 0} คน`);
-    set("reportHandRaised", `${latest.hand_raised ?? 0} คน`);
-    set("reportStanding", `${latest.standing ?? 0} คน`);
-    set("reportUnknown", `${latest.unknown ?? 0} คน`);
-    set("reportLatestAttention", `${s.latest_attention_rate ?? 0}%`);
+    set("reportMaxPeople", `นักเรียนสูงสุด: ${toWholePeople(s.max_people)} คน`);
+    set(
+      "reportBehaviorTitle",
+      isTimelineReport ? "ภาพรวมพฤติกรรม" : "พฤติกรรมล่าสุด",
+    );
+    set(
+      "reportAttentionLabel",
+      isTimelineReport ? "อัตราความตั้งใจเฉลี่ย" : "อัตราความตั้งใจล่าสุด",
+    );
+    set("reportAttentive", `${toWholePeople(reportBehavior.attentive)} คน`);
+    set("reportSleeping", `${toWholePeople(reportBehavior.sleeping)} คน`);
+    set("reportLookingDown", `${toWholePeople(reportBehavior.looking_down)} คน`);
+    set("reportHandRaised", `${toWholePeople(reportBehavior.hand_raised)} คน`);
+    set("reportStanding", `${toWholePeople(reportBehavior.standing)} คน`);
+    set("reportUnknown", `${toWholePeople(reportBehavior.unknown)} คน`);
+    set(
+      "reportLatestAttention",
+      `${isTimelineReport ? s.avg_attention_rate ?? 0 : s.latest_attention_rate ?? 0}%`,
+    );
+    renderReportTimeline(periods, latestExportData.period_seconds);
   } catch (e) {
     console.error("Error fetching export data:", e);
     latestExportData = null;
+    renderReportTimeline([]);
     const recEl = document.getElementById("reportRecords");
     if (recEl) recEl.textContent = "ไม่สามารถโหลดข้อมูลได้";
   }
@@ -895,12 +1111,12 @@ async function updateCharts() {
     if (behaviorPieChart && data.latest_summary) {
       const summary = data.latest_summary;
       behaviorPieChart.data.datasets[0].data = [
-        summary.attentive || 0,
-        summary.sleeping || 0,
-        summary.looking_down || 0,
-        summary.hand_raised || 0,
-        summary.standing || 0,
-        summary.unknown || 0,
+        toWholePeople(summary.attentive),
+        toWholePeople(summary.sleeping),
+        toWholePeople(summary.looking_down),
+        toWholePeople(summary.hand_raised),
+        toWholePeople(summary.standing),
+        toWholePeople(summary.unknown),
       ];
       behaviorPieChart.update("none");
     }
@@ -1034,8 +1250,17 @@ async function checkSourceStatus() {
       await handleVideoEnded(data);
     } else if (data.error) {
       setConnectionStatus("แหล่งภาพมีปัญหา", "text-red-600");
-      setSourceStatusText(`● Error: ${data.error}`, "text-xs font-medium text-red-600");
+      setSourceStatusText(`Error: ${data.error}`, "text-xs font-medium text-red-600");
       stopSourceStatusPolling();
+    } else if (data.processing_mode === "sampled") {
+      const progress = Number(data.progress_percent || 0).toFixed(1);
+      const position = formatVideoTime(data.position_seconds);
+      const duration = formatVideoTime(data.duration_seconds);
+      setConnectionStatus("กำลังวิเคราะห์คลิปยาว", "text-purple-600");
+      setSourceStatusText(
+        `กำลังวิเคราะห์ ${progress}% | ${position} / ${duration}`,
+        "text-xs font-medium text-purple-600",
+      );
     }
   } catch (_) {
     /* server not running is fine */
@@ -1160,21 +1385,31 @@ async function setVideoSource(labId, camId, source, displayLabel = null) {
       startLiveFeed();
       startChartUpdates();
       startAlertPolling();
+      updateAnalysisCadence(data);
       const srcLabel =
         displayLabel || (typeof source === "number" ? `Webcam ${source}` : source);
       setConnectionStatus("เชื่อมต่อแล้ว", "text-green-600");
-      showToast(`เชื่อมต่อสำเร็จ: ${srcLabel}`, "success");
+      if (data.processing_mode === "sampled") {
+        showToast(
+          `เริ่มวิเคราะห์คลิปยาว: ตรวจช่วง ${data.sample_window_seconds || 10} วินาที ทุก ${data.sample_interval_seconds || 60} วินาที`,
+          "success",
+        );
+      } else {
+        showToast(`เชื่อมต่อสำเร็จ: ${srcLabel}`, "success");
+      }
       _updateSourceStatus(labId, camId, srcLabel);
       startSourceStatusPolling();
     } else {
       currentSourceType = null;
       stopSourceStatusPolling();
+      updateAnalysisCadence();
       setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
       showToast(`เชื่อมต่อไม่สำเร็จ: ${data.error || ""}`, "alert");
     }
   } catch (e) {
     currentSourceType = null;
     stopSourceStatusPolling();
+    updateAnalysisCadence();
     setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
     showToast(`เชื่อมต่อไม่สำเร็จ: ${e.message}`, "alert");
   }

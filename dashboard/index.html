@@ -268,11 +268,11 @@
 
             <!-- Attention Rate Chart -->
             <div class="bg-white rounded-xl shadow-lg p-6">
-              <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-semibold text-gray-800">
+              <div class="flex flex-col gap-1 mb-4 sm:flex-row sm:items-center sm:justify-between">
+                <h3 id="attentionChartTitle" class="text-lg font-semibold text-gray-800">
                   กราฟความตั้งใจเรียน (Real-time)
                 </h3>
-                <span class="text-xs text-gray-500">อัปเดตทุก 2 วินาที</span>
+                <span id="attentionChartCadence" class="text-xs text-gray-500">อัปเดตทุก 2 วินาที</span>
               </div>
               <div class="h-48">
                 <canvas id="attentionChart"></canvas>
@@ -395,7 +395,7 @@
       class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50"
     >
       <div
-        class="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto"
+        class="bg-white rounded-xl shadow-2xl max-w-5xl w-full mx-4 max-h-[90vh] overflow-y-auto"
       >
         <div class="p-6">
           <div class="flex items-center justify-between mb-6">
@@ -403,6 +403,7 @@
               รายงานรอบวิเคราะห์
             </h3>
             <button
+              id="reportCloseButton"
               onclick="closeReportModal()"
               class="text-gray-500 hover:text-gray-700 text-2xl"
             >
@@ -412,7 +413,7 @@
 
           <div class="space-y-6">
             <!-- ข้อมูลทั่วไป + สถิติ -->
-            <div class="grid grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div class="bg-blue-50 p-4 rounded-lg">
                 <h4 class="font-semibold text-blue-800">ข้อมูลทั่วไป</h4>
                 <p class="text-sm text-blue-600 font-medium" id="reportLabName">
@@ -442,7 +443,9 @@
 
             <!-- พฤติกรรมล่าสุด -->
             <div class="bg-gray-50 p-4 rounded-lg">
-              <h4 class="font-semibold text-gray-800 mb-2">พฤติกรรมล่าสุด</h4>
+              <h4 id="reportBehaviorTitle" class="font-semibold text-gray-800 mb-2">
+                พฤติกรรมล่าสุด
+              </h4>
               <div class="grid grid-cols-2 gap-2 text-sm">
                 <div class="flex justify-between bg-green-50 px-3 py-1 rounded">
                   <span class="text-gray-600">ตั้งใจเรียน</span>
@@ -486,7 +489,9 @@
                 </div>
               </div>
               <div class="mt-2 flex justify-between items-center border-t pt-2">
-                <span class="text-gray-600 text-sm">อัตราความตั้งใจล่าสุด</span>
+                <span id="reportAttentionLabel" class="text-gray-600 text-sm"
+                  >อัตราความตั้งใจล่าสุด</span
+                >
                 <span
                   class="font-bold text-green-600 text-lg"
                   id="reportLatestAttention"
@@ -495,7 +500,37 @@
               </div>
             </div>
 
-            <div class="space-y-3">
+            <div id="reportTimelineSection" class="hidden">
+              <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
+                <h4 class="font-semibold text-gray-800">สรุปตามช่วงเวลา</h4>
+                <span id="reportTimelineCaption" class="text-xs text-gray-500"
+                  >ช่วงละ 10 นาที</span
+                >
+              </div>
+              <div
+                id="reportTimelineTableWrapper"
+                class="overflow-x-auto border border-gray-200 rounded-lg"
+              >
+                <table class="w-full min-w-[920px] text-xs text-left">
+                  <thead class="bg-gray-100 text-gray-700">
+                    <tr>
+                      <th class="px-3 py-2 font-semibold">ช่วงในคลิป</th>
+                      <th class="px-3 py-2 font-semibold text-right">คนเฉลี่ย</th>
+                      <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (%)</th>
+                      <th class="px-3 py-2 font-semibold text-right">ตั้งใจเรียน</th>
+                      <th class="px-3 py-2 font-semibold text-right">หลับ</th>
+                      <th class="px-3 py-2 font-semibold text-right">ก้มหน้า</th>
+                      <th class="px-3 py-2 font-semibold text-right">ยกมือ</th>
+                      <th class="px-3 py-2 font-semibold text-right">ยืน/ลุก</th>
+                      <th class="px-3 py-2 font-semibold text-right">ไม่ชัดเจน</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reportTimelineBody" class="divide-y divide-gray-100"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div id="reportDownloadActions" class="space-y-3">
               <div class="grid grid-cols-2 gap-3">
                 <button
                   onclick="downloadReport('pdf')"

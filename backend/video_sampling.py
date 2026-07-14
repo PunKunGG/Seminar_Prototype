@@ -1,0 +1,171 @@
+import math
+
+
+BEHAVIOR_KEYS = (
+    "attentive",
+    "sleeping",
+    "looking_down",
+    "hand_raised",
+    "standing",
+    "unknown",
+)
+
+
+def iter_sample_windows(duration_seconds, interval_seconds, window_seconds, sample_fps):
+    """Yield (window_start, sample_times) for a long video."""
+    duration = max(0.0, float(duration_seconds))
+    interval = max(0.001, float(interval_seconds))
+    window = min(interval, max(0.001, float(window_seconds)))
+    step = 1.0 / max(0.001, float(sample_fps))
+
+    window_start = 0.0
+    while window_start < duration:
+        sample_end = min(duration, window_start + window)
+        sample_count = max(1, int(math.ceil((sample_end - window_start) / step)))
+        sample_times = [
+            min(sample_end, window_start + (index * step))
+            for index in range(sample_count)
+        ]
+        yield window_start, sample_times
+        window_start += interval
+
+
+def iter_sequential_decode_steps(sample_times, source_fps):
+    """Yield each sample time and how many frames to grab before reading it."""
+    times = list(sample_times)
+    if not times:
+        return
+
+    fps = max(0.001, float(source_fps))
+    base_time = times[0]
+    previous_target_frame = 0
+
+    for index, sample_time in enumerate(times):
+        target_frame = round((sample_time - base_time) * fps)
+        frames_to_grab = 0 if index == 0 else max(
+            0,
+            target_frame - previous_target_frame - 1,
+        )
+        yield sample_time, frames_to_grab
+        previous_target_frame = target_frame
+
+
+def aggregate_analyses(analyses):
+    """Combine sampled frame results into one representative timeline point."""
+    if not analyses:
+        return None
+
+    frame_count = len(analyses)
+    summary_totals = {key: 0.0 for key in BEHAVIOR_KEYS}
+    person_observations = 0.0
+
+    for analysis in analyses:
+        summary = analysis.get("summary") or {}
+        person_observations += float(analysis.get("total_people") or 0)
+        for key in BEHAVIOR_KEYS:
+            summary_totals[key] += float(summary.get(key) or 0)
+
+    behavior_observations = sum(summary_totals.values())
+    if behavior_observations <= 0 and person_observations > 0:
+        summary_totals["unknown"] = person_observations
+        behavior_observations = person_observations
+
+    attentive_observations = (
+        summary_totals["attentive"] + summary_totals["hand_raised"]
+    )
+    attention_rate = (
+        round((attentive_observations / behavior_observations) * 100, 1)
+        if behavior_observations
+        else 0
+    )
+
+    average_counts = {
+        key: total / frame_count
+        for key, total in summary_totals.items()
+    }
+    total_people = int(math.floor(sum(average_counts.values()) + 0.5))
+    integer_summary = {
+        key: int(math.floor(value))
+        for key, value in average_counts.items()
+    }
+    remaining = total_people - sum(integer_summary.values())
+    ranked_keys = sorted(
+        BEHAVIOR_KEYS,
+        key=lambda key: (
+            average_counts[key] - integer_summary[key],
+            average_counts[key],
+        ),
+        reverse=True,
+    )
+    for index in range(max(0, remaining)):
+        integer_summary[ranked_keys[index % len(ranked_keys)]] += 1
+
+    return {
+        "total_people": total_people,
+        "behaviors": [],
+        "summary": integer_summary,
+        "attention_rate": attention_rate,
+        "annotated_frame": analyses[-1].get("annotated_frame"),
+        "sampled_frames": frame_count,
+    }
+
+
+def build_report_periods(history, period_seconds=600):
+    """Group sampled-video history into readable report periods."""
+    period = max(60, int(period_seconds))
+    buckets = {}
+
+    for item in history:
+        position = item.get("video_position_seconds")
+        try:
+            position = float(position)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(position) or position < 0:
+            continue
+
+        bucket_index = int(position // period)
+        buckets.setdefault(bucket_index, []).append(item)
+
+    periods = []
+    for bucket_index in sorted(buckets):
+        items = buckets[bucket_index]
+        aggregate = aggregate_analyses(items)
+        if aggregate is None:
+            continue
+
+        start_seconds = bucket_index * period
+        end_seconds = start_seconds + period
+        periods.append({
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "label": (
+                f"{format_video_time(start_seconds)} - "
+                f"{format_video_time(end_seconds)}"
+            ),
+            "avg_attention_rate": round(
+                sum(float(item.get("attention_rate") or 0) for item in items)
+                / len(items),
+                1,
+            ),
+            "avg_people": round(
+                sum(float(item.get("total_people") or 0) for item in items)
+                / len(items),
+                1,
+            ),
+            "max_people": max(
+                int(round(float(item.get("total_people") or 0)))
+                for item in items
+            ),
+            "summary": aggregate["summary"],
+            "records": len(items),
+        })
+
+    return periods
+
+
+def format_video_time(seconds):
+    total_seconds = max(0, int(round(float(seconds))))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"

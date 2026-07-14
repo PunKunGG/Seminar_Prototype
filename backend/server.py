@@ -5,9 +5,17 @@ from werkzeug.utils import secure_filename
 import cv2, os, json, time, threading
 import ipaddress
 import sys
+import math
 from datetime import datetime
 from collections import deque
 from behavior_analyzer import analyze_frame, get_behavior_label_th
+from video_sampling import (
+    aggregate_analyses,
+    build_report_periods,
+    format_video_time,
+    iter_sample_windows,
+    iter_sequential_decode_steps,
+)
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -46,6 +54,16 @@ def _env_int(name, default):
         return default
 
 
+def _env_float(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def _first_existing_path(*paths):
     for path in paths:
         if path and os.path.exists(path):
@@ -67,7 +85,7 @@ detection_lock = threading.Lock()
 stats_history = {}  # {lab_id: deque of stats}
 activity_log = {}   # {lab_id: deque of activities}
 session_names = {}  # {lab_id: display name from frontend}
-MAX_HISTORY = 30
+MAX_HISTORY = max(30, _env_int("CLASSMOOD_MAX_HISTORY", 480))
 state_lock = threading.RLock()
 
 # 🔄 Inference cache — ป้องกัน double inference (behavior-frame + behavior ต่อ tick เดียวกัน)
@@ -96,6 +114,22 @@ if not VIDEO_SOURCE_DIRS:
 MAX_WEBCAM_INDEX = _env_int("CLASSMOOD_MAX_WEBCAM_INDEX", 9)
 MAX_VIDEO_UPLOAD_MB = max(1, _env_int("CLASSMOOD_MAX_VIDEO_UPLOAD_MB", 512))
 ANNOTATED_STREAM_FPS = min(5, max(1, _env_int("CLASSMOOD_ANNOTATED_STREAM_FPS", 5)))
+LONG_VIDEO_THRESHOLD_SECONDS = max(
+    60,
+    _env_int("CLASSMOOD_LONG_VIDEO_THRESHOLD_SECONDS", 30 * 60),
+)
+LONG_VIDEO_SAMPLE_INTERVAL_SECONDS = max(
+    10,
+    _env_int("CLASSMOOD_LONG_VIDEO_SAMPLE_INTERVAL_SECONDS", 60),
+)
+LONG_VIDEO_SAMPLE_WINDOW_SECONDS = min(
+    LONG_VIDEO_SAMPLE_INTERVAL_SECONDS,
+    max(1, _env_int("CLASSMOOD_LONG_VIDEO_SAMPLE_WINDOW_SECONDS", 10)),
+)
+LONG_VIDEO_SAMPLE_FPS = min(
+    5.0,
+    max(0.1, _env_float("CLASSMOOD_LONG_VIDEO_SAMPLE_FPS", 2.0)),
+)
 VIDEO_UPLOAD_DIR = VIDEO_SOURCE_DIRS[0]
 app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_UPLOAD_MB * 1024 * 1024
 
@@ -201,7 +235,9 @@ def _get_image_path(lab_id, cam_id):
 def _get_cached(lab_id, cam_id):
     with state_lock:
         entry = analysis_cache.get((lab_id, cam_id))
-        if entry and (time.time() - entry["ts"]) < CACHE_TTL:
+        source_state = source_states.get((lab_id, cam_id), {})
+        is_sampled_video = source_state.get("processing_mode") == "sampled"
+        if entry and (is_sampled_video or (time.time() - entry["ts"]) < CACHE_TTL):
             return entry["result"]
     return None
 
@@ -243,7 +279,155 @@ def _set_source_state(key, **updates):
         return dict(state)
 
 
-def _capture_loop(key):
+def _probe_source(cap, source):
+    metadata = {
+        "processing_mode": "realtime",
+        "duration_seconds": None,
+        "fps": None,
+        "frame_count": None,
+    }
+    if not isinstance(source, str):
+        return metadata
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = frame_count / fps if fps > 0 and frame_count > 0 else 0
+    if not math.isfinite(duration) or duration <= 0:
+        duration = None
+
+    metadata.update({
+        "duration_seconds": round(duration, 3) if duration is not None else None,
+        "fps": round(fps, 3) if fps > 0 else None,
+        "frame_count": frame_count if frame_count > 0 else None,
+    })
+    if duration is not None and duration >= LONG_VIDEO_THRESHOLD_SECONDS:
+        metadata.update({
+            "processing_mode": "sampled",
+            "sample_interval_seconds": LONG_VIDEO_SAMPLE_INTERVAL_SECONDS,
+            "sample_window_seconds": LONG_VIDEO_SAMPLE_WINDOW_SECONDS,
+            "sample_fps": LONG_VIDEO_SAMPLE_FPS,
+            "total_windows": int(math.ceil(duration / LONG_VIDEO_SAMPLE_INTERVAL_SECONDS)),
+        })
+    return metadata
+
+
+def _capture_is_current(key, buf):
+    return buf.get("running", False) and frame_buffers.get(key) is buf
+
+
+def _store_buffer_frame(buf, frame, annotated_frame=None):
+    with buf["lock"]:
+        buf["frame"] = frame
+        buf["annotated_frame"] = annotated_frame
+        buf["frame_token"] += 1
+        buf["count_frame"] = None
+        buf["count_token"] = -1
+
+
+def _capture_sampled_video(key, buf, cap, metadata):
+    lab_id, cam_id = key
+    source_fps = float(metadata.get("fps") or cap.get(cv2.CAP_PROP_FPS) or 30)
+    if not math.isfinite(source_fps) or source_fps <= 0:
+        source_fps = 30
+    windows = list(iter_sample_windows(
+        metadata["duration_seconds"],
+        metadata["sample_interval_seconds"],
+        metadata["sample_window_seconds"],
+        metadata["sample_fps"],
+    ))
+    total_samples = sum(len(sample_times) for _, sample_times in windows)
+    processed_samples = 0
+
+    for window_index, (window_start, sample_times) in enumerate(windows, start=1):
+        if not _capture_is_current(key, buf):
+            return
+
+        window_analyses = []
+        seek_ok = cap.set(cv2.CAP_PROP_POS_MSEC, window_start * 1000)
+        if not seek_ok and window_start > 0:
+            print(f"⚠️ ข้ามช่วงวิดีโอที่ seek ไม่สำเร็จ: {format_video_time(window_start)}")
+            continue
+
+        for sample_time, frames_to_grab in iter_sequential_decode_steps(
+            sample_times,
+            source_fps,
+        ):
+            if not _capture_is_current(key, buf):
+                return
+
+            grab_ok = True
+            for _ in range(frames_to_grab):
+                if not cap.grab():
+                    grab_ok = False
+                    break
+            if not grab_ok:
+                break
+
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+
+            analysis = analyze_frame(frame)
+            if not _capture_is_current(key, buf):
+                return
+
+            window_analyses.append({
+                "total_people": analysis["total_people"],
+                "summary": analysis["summary"],
+                "annotated_frame": None,
+            })
+            processed_samples += 1
+            _store_buffer_frame(buf, frame, analysis.get("annotated_frame"))
+            _set_cached(lab_id, cam_id, analysis)
+            _set_source_state(
+                key,
+                position_seconds=round(sample_time, 1),
+                progress_percent=round(
+                    (processed_samples / total_samples) * 100,
+                    1,
+                ) if total_samples else 100,
+                processed_samples=processed_samples,
+                total_samples=total_samples,
+            )
+
+        aggregate = aggregate_analyses(window_analyses)
+        if aggregate is not None:
+            aggregate["annotated_frame"] = _get_buffer_frame(
+                lab_id,
+                cam_id,
+                "annotated_frame",
+            )
+            _set_cached(lab_id, cam_id, aggregate)
+            record_stats(
+                lab_id,
+                aggregate,
+                time_label=format_video_time(window_start),
+                video_position_seconds=round(window_start, 1),
+            )
+
+        _set_source_state(
+            key,
+            processed_windows=window_index,
+            total_windows=len(windows),
+        )
+
+    if not _capture_is_current(key, buf):
+        return
+
+    buf["running"] = False
+    buf["ended"] = True
+    _set_source_state(
+        key,
+        active=False,
+        ended=True,
+        error=None,
+        progress_percent=100,
+        position_seconds=metadata["duration_seconds"],
+        ended_at=_now_str(),
+    )
+
+
+def _capture_loop(key, metadata):
     """Background thread อ่าน frame ต่อเนื่องจาก VideoCapture"""
     buf = frame_buffers[key]
     src = video_sources.get(key)
@@ -261,6 +445,25 @@ def _capture_loop(key):
         )
         return
     print(f"🎥 เปิด {'วิดีโอ' if is_file else 'เว็บแคม'} {key} → {src}")
+    if metadata.get("processing_mode") == "sampled":
+        try:
+            _capture_sampled_video(key, buf, cap, metadata)
+        except Exception as e:
+            if frame_buffers.get(key) is buf:
+                buf["running"] = False
+                _set_source_state(
+                    key,
+                    active=False,
+                    ended=False,
+                    error=f"Long video analysis failed: {e}",
+                    ended_at=_now_str(),
+                )
+            print(f"⚠️ วิเคราะห์คลิปยาวไม่สำเร็จ {key}: {e}")
+        finally:
+            cap.release()
+        print(f"🛑 ปิดวิดีโอ {key}")
+        return
+
     while buf["running"]:
         ok, frame = cap.read()
         if not ok:
@@ -279,21 +482,31 @@ def _capture_loop(key):
                 time.sleep(0.05)
                 continue
         if ok and frame is not None:
-            with buf["lock"]:
-                buf["frame"] = frame
+            _store_buffer_frame(buf, frame)
         time.sleep(0.033)  # ~30 FPS max
     cap.release()
     print(f"🛑 ปิด {'วิดีโอ' if is_file else 'เว็บแคม'} {key}")
 
 
-def _start_capture(lab_id, cam_id, source):
+def _start_capture(lab_id, cam_id, source, metadata=None):
     """เริ่ม background thread สำหรับ (lab_id, cam_id)"""
     key = (lab_id, cam_id)
     _stop_capture(lab_id, cam_id)  # หยุด thread เก่าก่อน
+    metadata = dict(metadata or {})
     video_sources[key] = source
-    buf = {"frame": None, "lock": threading.Lock(), "running": True, "thread": None, "ended": False}
+    buf = {
+        "frame": None,
+        "annotated_frame": None,
+        "count_frame": None,
+        "frame_token": 0,
+        "count_token": -1,
+        "lock": threading.Lock(),
+        "running": True,
+        "thread": None,
+        "ended": False,
+    }
     frame_buffers[key] = buf
-    _set_source_state(
+    state = _set_source_state(
         key,
         source=source,
         source_type=_source_type(source),
@@ -302,10 +515,15 @@ def _start_capture(lab_id, cam_id, source):
         error=None,
         started_at=_now_str(),
         ended_at=None,
+        progress_percent=0 if metadata.get("processing_mode") == "sampled" else None,
+        position_seconds=0 if metadata.get("processing_mode") == "sampled" else None,
+        processed_windows=0 if metadata.get("processing_mode") == "sampled" else None,
+        **metadata,
     )
-    t = threading.Thread(target=_capture_loop, args=(key,), daemon=True)
+    t = threading.Thread(target=_capture_loop, args=(key, metadata), daemon=True)
     buf["thread"] = t
     t.start()
+    return state
 
 
 def _stop_capture(lab_id, cam_id):
@@ -324,15 +542,19 @@ def _stop_capture(lab_id, cam_id):
         analysis_locks.pop(key, None)
 
 
-def get_live_frame(lab_id, cam_id):
-    """คืน frame ล่าสุดจาก buffer หรือ None ถ้าไม่มี live source"""
+def _get_buffer_frame(lab_id, cam_id, field="frame"):
     buf = frame_buffers.get((lab_id, cam_id))
     if buf:
         with buf["lock"]:
-            f = buf["frame"]
+            f = buf.get(field)
         if f is not None:
             return f.copy()
     return None
+
+
+def get_live_frame(lab_id, cam_id):
+    """คืน frame ล่าสุดจาก buffer หรือ None ถ้าไม่มี live source"""
+    return _get_buffer_frame(lab_id, cam_id, "frame")
 
 
 def _read_frame(lab_id, cam_id):
@@ -357,6 +579,24 @@ def _get_or_analyze(lab_id, cam_id, frame=None):
     analysis = _get_cached(lab_id, cam_id)
     if analysis is not None:
         return analysis, False, None
+
+    with state_lock:
+        source_state = source_states.get((lab_id, cam_id), {})
+    if source_state.get("processing_mode") == "sampled":
+        return {
+            "total_people": 0,
+            "behaviors": [],
+            "summary": {
+                "attentive": 0,
+                "sleeping": 0,
+                "looking_down": 0,
+                "hand_raised": 0,
+                "standing": 0,
+                "unknown": 0,
+            },
+            "attention_rate": 0,
+            "annotated_frame": None,
+        }, False, None
 
     analysis_lock = _get_analysis_lock(lab_id, cam_id)
     with analysis_lock:
@@ -407,6 +647,31 @@ def _annotate_stream_frame(frame, mode):
         annotated_frame = analysis.get("annotated_frame")
         return annotated_frame if annotated_frame is not None else frame
     return _annotate_count_frame(frame)
+
+
+def _sampled_stream_frame(lab_id, cam_id, frame, mode):
+    key = (lab_id, cam_id)
+    buf = frame_buffers.get(key)
+    if not buf:
+        return frame
+
+    if mode == "behavior":
+        annotated_frame = _get_buffer_frame(lab_id, cam_id, "annotated_frame")
+        return annotated_frame if annotated_frame is not None else frame
+
+    with buf["lock"]:
+        frame_token = buf["frame_token"]
+        cached_count_frame = buf.get("count_frame")
+        count_token = buf.get("count_token")
+    if cached_count_frame is not None and count_token == frame_token:
+        return cached_count_frame.copy()
+
+    annotated_frame = _annotate_count_frame(frame)
+    with buf["lock"]:
+        if buf["frame_token"] == frame_token:
+            buf["count_frame"] = annotated_frame
+            buf["count_token"] = frame_token
+    return annotated_frame
 
 
 def _push_alert_unlocked(lab_id, alert_type, message):
@@ -493,6 +758,20 @@ def get_lab_frame(lab_id, cam_id):
 # ✅ API 2: ส่งข้อมูลการตรวจจับ (จำนวนคน, ความมั่นใจเฉลี่ย)
 @app.route("/api/data/<lab_id>/<int:cam_id>")
 def get_lab_data(lab_id, cam_id):
+    with state_lock:
+        source_state = source_states.get((lab_id, cam_id), {})
+    if source_state.get("processing_mode") == "sampled":
+        analysis = _get_cached(lab_id, cam_id)
+        people_count = round(analysis["total_people"]) if analysis else 0
+        return jsonify({
+            "lab_id": lab_id,
+            "camera_id": cam_id,
+            "num_people": people_count,
+            "avg_confidence": 0,
+            "detected_objects": people_count,
+            "processing_mode": "sampled",
+        })
+
     frame, err = _read_frame(lab_id, cam_id)
     if err:
         return err
@@ -618,9 +897,9 @@ def get_activities(lab_id):
 
 
 # 📝 ฟังก์ชันบันทึกสถิติ (เรียกครั้งเดียวต่อ cache miss)
-def record_stats(lab_id, analysis):
+def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None):
     now = datetime.now()
-    time_str = now.strftime("%H:%M:%S")
+    time_str = time_label or now.strftime("%H:%M:%S")
 
     summary      = analysis["summary"]
     sleeping     = summary.get("sleeping", 0)
@@ -633,12 +912,18 @@ def record_stats(lab_id, analysis):
         if lab_id not in activity_log:
             activity_log[lab_id] = deque(maxlen=20)
 
-        stats_history[lab_id].append({
+        history_item = {
             "time": time_str,
             "attention_rate": analysis["attention_rate"],
             "total_people": analysis["total_people"],
-            "summary": analysis["summary"]
-        })
+            "summary": analysis["summary"],
+        }
+        if video_position_seconds is not None:
+            history_item.update({
+                "video_position_seconds": video_position_seconds,
+                "sampled_frames": analysis.get("sampled_frames", 0),
+            })
+        stats_history[lab_id].append(history_item)
 
         # • แจ้งเตือนนักศึกษาหลับ
         if sleeping > 0:
@@ -672,6 +957,8 @@ def export_lab_data(lab_id):
     avg_people = round(sum(h["total_people"] for h in history) / len(history), 1) if history else 0
     max_people = max((h["total_people"] for h in history), default=0)
     latest = history[-1] if history else None
+    overall = aggregate_analyses(history)
+    periods = build_report_periods(history)
 
     return jsonify({
         "lab_id": lab_id,
@@ -687,8 +974,14 @@ def export_lab_data(lab_id):
             "latest_summary": latest["summary"] if latest else {
                 "attentive": 0, "sleeping": 0, "looking_down": 0,
                 "hand_raised": 0, "standing": 0, "unknown": 0
-            }
+            },
+            "overall_summary": overall["summary"] if overall else {
+                "attentive": 0, "sleeping": 0, "looking_down": 0,
+                "hand_raised": 0, "standing": 0, "unknown": 0
+            },
         },
+        "period_seconds": 600 if periods else None,
+        "periods": periods,
         "history": history,
         "activities": activities
     })
@@ -767,7 +1060,13 @@ def _gen_annotated_mjpeg(lab_id, cam_id, mode):
         frame = get_live_frame(lab_id, cam_id)
         if frame is None:
             time.sleep(0.05)
-            idle += 1
+            with state_lock:
+                source_state = source_states.get((lab_id, cam_id), {})
+            waiting_for_sample = (
+                source_state.get("processing_mode") == "sampled"
+                and source_state.get("active", False)
+            )
+            idle = 0 if waiting_for_sample else idle + 1
             if idle > 100:
                 print(f"⏱️ annotated stream หมดเวลารอ frame: {lab_id}/{cam_id}")
                 break
@@ -775,7 +1074,12 @@ def _gen_annotated_mjpeg(lab_id, cam_id, mode):
 
         idle = 0
         try:
-            annotated_frame = _annotate_stream_frame(frame, mode)
+            with state_lock:
+                source_state = source_states.get((lab_id, cam_id), {})
+            if source_state.get("processing_mode") == "sampled":
+                annotated_frame = _sampled_stream_frame(lab_id, cam_id, frame, mode)
+            else:
+                annotated_frame = _annotate_stream_frame(frame, mode)
         except Exception as e:
             print(f"⚠️ annotated stream วิเคราะห์เฟรมไม่สำเร็จ: {e}")
             annotated_frame = frame
@@ -903,17 +1207,31 @@ def set_source(lab_id, cam_id):
         test_cap.release()
         label = f"webcam {source}" if isinstance(source, int) else source
         return jsonify({"error": f"ไม่สามารถเปิดได้: {label}"}), 400
+    metadata = _probe_source(test_cap, source)
     test_cap.release()
 
-    _start_capture(lab_id, cam_id, source)
-    return jsonify({
+    source_state = _start_capture(lab_id, cam_id, source, metadata)
+    payload = {
         "ok": True,
         "lab_id": lab_id,
         "cam_id": cam_id,
         "session_name": _session_label(lab_id),
         "source": source,
         "source_type": _source_type(source),
+    }
+    payload.update({
+        key: source_state.get(key)
+        for key in (
+            "processing_mode",
+            "duration_seconds",
+            "sample_interval_seconds",
+            "sample_window_seconds",
+            "sample_fps",
+            "total_windows",
+        )
+        if source_state.get(key) is not None
     })
+    return jsonify(payload)
 
 
 @app.route("/api/sources/<lab_id>/<int:cam_id>", methods=["DELETE"])

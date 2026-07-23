@@ -1,6 +1,9 @@
 let currentCamera = 1;
 let currentLab = "";
 let currentSessionName = "";
+let currentRoomName = "";
+let currentCourseName = "";
+let currentRecordingStart = "";
 let useBehaviorMode = true; // ✅ เปิดโหมดวิเคราะห์พฤติกรรมเป็นค่าเริ่มต้น
 let liveFeedInterval = null;
 let lastAlertId = 0; // ID สุดท้ายที่ได้รับเพื่อหลีกเอา alert ซ้ำ
@@ -46,6 +49,144 @@ function toWholePeople(value) {
 function formatDecimal(value) {
   const number = Number(value) || 0;
   return number.toFixed(1).replace(/\.0$/, "");
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) return `${hours} ชม. ${minutes} นาที`;
+  if (minutes > 0) return `${minutes} นาที ${secs} วินาที`;
+  return `${secs} วินาที`;
+}
+
+function behaviorLabel(value) {
+  return {
+    attentive: "ตั้งใจเรียน",
+    sleeping: "หลับ",
+    looking_down: "ก้มหน้า/โทรศัพท์",
+    hand_raised: "ยกมือ",
+    standing: "ยืน/ลุก",
+    unknown: "ไม่ชัดเจน",
+  }[value] || value || "-";
+}
+
+function renderLiveTracks(tracks = []) {
+  const body = document.getElementById("liveTrackRows");
+  const empty = document.getElementById("liveTrackEmpty");
+  if (!body || !empty) return;
+
+  const sorted = [...tracks].sort(
+    (left, right) => Number(left.track_id) - Number(right.track_id),
+  );
+  empty.classList.toggle("hidden", sorted.length > 0);
+  body.innerHTML = sorted
+    .map((track) => {
+      const counts = track.event_counts || {};
+      return `
+        <tr class="border-t border-gray-100">
+          <td class="px-3 py-2 font-semibold text-blue-700 whitespace-nowrap">ID ${toWholePeople(track.track_id)}</td>
+          <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(behaviorLabel(track.current_behavior))}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(track.visible_seconds)}</td>
+          <td class="px-3 py-2 text-right font-semibold text-green-700">${formatDecimal(track.attention_rate)}%</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.sleeping)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.looking_down)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.hand_raised)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.standing)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderTrackingReport(tracking = null) {
+  const section = document.getElementById("reportTrackingSection");
+  const body = document.getElementById("reportTrackingRows");
+  if (!section || !body) return;
+
+  const periods = tracking?.periods || [];
+  const overallTracks = tracking?.tracks || [];
+  const rows = periods.length
+    ? periods.flatMap((period) =>
+        (period.tracks || []).map((track) => ({
+          ...track,
+          period_label: period.label,
+        })),
+      )
+    : overallTracks.map((track) => ({
+        ...track,
+        period_label: "ภาพรวม",
+      }));
+
+  section.classList.toggle("hidden", rows.length === 0);
+  body.innerHTML = rows
+    .map((track, index) => {
+      const counts = track.event_counts || {};
+      const rowClass = index % 2 === 0 ? "bg-white" : "bg-gray-50";
+      return `
+        <tr class="${rowClass}">
+          <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(track.period_label)}</td>
+          <td class="px-3 py-2 font-semibold text-blue-700 whitespace-nowrap">ID ${toWholePeople(track.track_id)}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(track.visible_seconds)}</td>
+          <td class="px-3 py-2 text-right font-semibold text-green-700">${formatDecimal(track.attention_rate)}%</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.attentive)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.sleeping)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.looking_down)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.hand_raised)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.standing)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.unknown)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderEvidenceReport(tracking = null) {
+  const section = document.getElementById("reportEvidenceSection");
+  const gallery = document.getElementById("reportEvidenceGallery");
+  const caption = document.getElementById("reportEvidenceCaption");
+  if (!section || !gallery || !caption) return;
+
+  const evidence = tracking?.evidence || [];
+  const displayLimit = 60;
+  const references = evidence.filter((item) => item.kind === "reference");
+  const events = evidence.filter((item) => item.kind !== "reference");
+  const visibleEvidence = [
+    ...references.slice(0, displayLimit),
+    ...events.slice(0, Math.max(0, displayLimit - references.length)),
+  ];
+  section.classList.toggle("hidden", visibleEvidence.length === 0);
+  caption.textContent =
+    evidence.length > displayLimit
+      ? `แสดง ${displayLimit} จาก ${evidence.length} ภาพ`
+      : `${evidence.length} ภาพ`;
+
+  gallery.innerHTML = visibleEvidence
+    .map((item) => {
+      const event = item.event || {};
+      const isReference = item.kind === "reference";
+      const title = isReference
+        ? `ID ${toWholePeople(item.track_id)} - ภาพอ้างอิง`
+        : `ID ${toWholePeople(item.track_id)} - ${behaviorLabel(item.behavior)}`;
+      const detail = isReference
+        ? `ตรวจพบครั้งแรก ${item.captured_time || "-"}`
+        : `${item.captured_time || "-"} | ${formatDuration(event.duration_seconds)} | มั่นใจ ${formatDecimal(event.avg_confidence)}%`;
+      return `
+        <figure class="min-w-0 border border-gray-200 rounded-lg overflow-hidden bg-white">
+          <img
+            src="${escapeHtml(apiUrl(item.url || ""))}"
+            alt="${escapeHtml(title)}"
+            class="h-40 w-full object-cover bg-gray-100"
+          />
+          <figcaption class="px-3 py-2">
+            <p class="text-sm font-semibold text-gray-800">${escapeHtml(title)}</p>
+            <p class="mt-1 text-xs text-gray-500">${escapeHtml(detail)}</p>
+          </figcaption>
+        </figure>
+      `;
+    })
+    .join("");
 }
 
 function renderReportTimeline(periods = [], periodSeconds = 600) {
@@ -250,6 +391,7 @@ function updateBehaviorStats(data) {
   const unknownEl = document.getElementById("behaviorUnknown");
   const attentionRateEl = document.getElementById("attentionRate");
   const attentionBarEl = document.getElementById("attentionBar");
+  renderLiveTracks(data.tracks || []);
 
   if (data.summary) {
     if (attentiveEl)
@@ -385,6 +527,14 @@ function getDefaultSessionName() {
   })}`;
 }
 
+function resetRecordingStartInput() {
+  const input = document.getElementById("recordingStartInput");
+  if (!input) return;
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  input.value = local.toISOString().slice(0, 16);
+}
+
 function resetDashboardState() {
   stopSourceStatusPolling();
   latestExportData = null;
@@ -428,12 +578,19 @@ function resetDashboardState() {
 
   const input = document.getElementById("videoFileInput");
   if (input) input.value = "";
+  renderLiveTracks([]);
 }
 
 // 🎥 เริ่มรอบวิเคราะห์
 function startSession() {
   const input = document.getElementById("sessionNameInput");
   const name = input?.value.trim() || getDefaultSessionName();
+  currentRoomName =
+    document.getElementById("roomNameInput")?.value.trim() || "ไม่ระบุ";
+  currentCourseName =
+    document.getElementById("courseNameInput")?.value.trim() || "ไม่ระบุ";
+  currentRecordingStart =
+    document.getElementById("recordingStartInput")?.value || "";
   openAnalysisSession(makeSessionId(name), name);
 }
 
@@ -445,6 +602,10 @@ function openAnalysisSession(sessionId, sessionName) {
   document.getElementById("labMenu").classList.add("hidden");
   document.getElementById("labInterface").classList.remove("hidden");
   document.getElementById("currentLabName").textContent = sessionName;
+  setTextIfPresent(
+    "currentSessionMeta",
+    `${currentCourseName} | ${currentRoomName}`,
+  );
 
   resetDashboardState();
   updateCameraFeed();
@@ -456,10 +617,22 @@ function openAnalysisSession(sessionId, sessionName) {
 
 // 🔙 กลับไปหน้าเริ่มต้น
 function backToMenu() {
+  const sessionId = currentLab;
+  const cameraId = currentCamera;
+  if (sessionId && isStreamActive(sessionId, cameraId)) {
+    fetch(apiUrl(`/api/sources/${sessionId}/${cameraId}`), {
+      method: "DELETE",
+    }).catch(() => {
+      /* the server may already be stopped */
+    });
+  }
   document.getElementById("labInterface").classList.add("hidden");
   document.getElementById("labMenu").classList.remove("hidden");
   currentLab = "";
   currentSessionName = "";
+  currentRoomName = "";
+  currentCourseName = "";
+  currentRecordingStart = "";
 
   // หยุด intervals
   if (liveFeedInterval) {
@@ -469,6 +642,7 @@ function backToMenu() {
   stopChartUpdates();
   stopAlertPolling(); // 🔔 หยุดยิงฟังแจ้งเตือน
   resetDashboardState();
+  resetRecordingStartInput();
 }
 
 // 🌙 โหมดมืด / สว่าง
@@ -581,6 +755,82 @@ function downloadReport(format) {
   }
 }
 
+function appendTrackingExportRows(rows) {
+  const tracking = latestExportData?.tracking;
+  if (!tracking) return;
+
+  const session = tracking.session || {};
+  rows.push([]);
+  rows.push(["ข้อมูลคาบเรียน"]);
+  rows.push(["รายวิชา", session.course_name || "ไม่ระบุ"]);
+  rows.push(["ห้อง", session.room_name || "ไม่ระบุ"]);
+  rows.push(["เวลาเริ่มบันทึก", session.recording_started_at || "-"]);
+
+  const periods = tracking.periods || [];
+  const reportRows = periods.length
+    ? periods.flatMap((period) =>
+        (period.tracks || []).map((track) => [period.label, track]),
+      )
+    : (tracking.tracks || []).map((track) => ["ภาพรวม", track]);
+  if (!reportRows.length) return;
+
+  rows.push([]);
+  rows.push(["สรุปรายบุคคล (Anonymous ID)"]);
+  rows.push([
+    "ช่วงเวลา",
+    "รหัสบุคคล",
+    "เวลาที่ตรวจพบ (วินาที)",
+    "ความตั้งใจ (%)",
+    "ตั้งใจเรียน (ครั้ง)",
+    "หลับ (ครั้ง)",
+    "ก้มหน้า/โทรศัพท์ (ครั้ง)",
+    "ยกมือ (ครั้ง)",
+    "ยืน/ลุก (ครั้ง)",
+    "ไม่ชัดเจน (ครั้ง)",
+  ]);
+  for (const [periodLabel, track] of reportRows) {
+    const counts = track.event_counts || {};
+    rows.push([
+      periodLabel,
+      `ID ${track.track_id}`,
+      track.visible_seconds,
+      track.attention_rate,
+      toWholePeople(counts.attentive),
+      toWholePeople(counts.sleeping),
+      toWholePeople(counts.looking_down),
+      toWholePeople(counts.hand_raised),
+      toWholePeople(counts.standing),
+      toWholePeople(counts.unknown),
+    ]);
+  }
+
+  const evidence = tracking.evidence || [];
+  if (!evidence.length) return;
+  rows.push([]);
+  rows.push(["ภาพหลักฐานประกอบเหตุการณ์"]);
+  rows.push([
+    "รหัสบุคคล",
+    "ประเภทภาพ",
+    "เวลา",
+    "พฤติกรรม",
+    "ระยะเวลา (วินาที)",
+    "ความมั่นใจ (%)",
+    "ชื่อไฟล์",
+  ]);
+  for (const item of evidence) {
+    const event = item.event || {};
+    rows.push([
+      `ID ${item.track_id}`,
+      item.kind === "reference" ? "ภาพอ้างอิง" : "ภาพเหตุการณ์",
+      item.captured_time,
+      behaviorLabel(item.behavior),
+      item.kind === "event" ? event.duration_seconds : "",
+      item.kind === "event" ? event.avg_confidence : "",
+      item.filename,
+    ]);
+  }
+}
+
 // 🛠️ สร้างเนื้อหา CSV
 function buildCSV(data) {
   const rows = [
@@ -632,6 +882,8 @@ function buildCSV(data) {
       ]);
     }
   }
+
+  appendTrackingExportRows(rows);
 
   // เพิ่มข้อมูลย้อนหลัง
   if (
@@ -716,6 +968,8 @@ function buildExcel(data) {
     }
   }
 
+  appendTrackingExportRows(rows);
+
   if (
     latestExportData &&
     latestExportData.history &&
@@ -745,6 +999,66 @@ function buildExcel(data) {
   return rows.map((r) => r.join("\t")).join("\n");
 }
 
+function waitForReportImages(root, timeoutMs = 5000) {
+  const images = Array.from(root.querySelectorAll("img"));
+  if (!images.length) return Promise.resolve();
+  return Promise.all(
+    images.map(
+      (image) =>
+        new Promise((resolve) => {
+          if (image.complete) {
+            resolve();
+            return;
+          }
+          const done = () => resolve();
+          image.addEventListener("load", done, { once: true });
+          image.addEventListener("error", done, { once: true });
+          setTimeout(done, timeoutMs);
+        }),
+    ),
+  );
+}
+
+function collectPdfKeepTogetherRanges(root) {
+  const rootRect = root.getBoundingClientRect();
+  if (!rootRect.height) return [];
+
+  return Array.from(
+    root.querySelectorAll(
+      "[data-pdf-keep-together], #reportEvidenceGallery figure, table tr, canvas",
+    ),
+  )
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        top: Math.max(0, rect.top - rootRect.top),
+        bottom: Math.min(rootRect.height, rect.bottom - rootRect.top),
+      };
+    })
+    .filter((range) => range.bottom - range.top > 1);
+}
+
+function choosePdfSliceEnd(
+  sourceStart,
+  desiredEnd,
+  pagePixelHeight,
+  keepTogetherRanges,
+) {
+  const crossingRanges = keepTogetherRanges.filter((range) => {
+    const height = range.bottom - range.top;
+    return (
+      height <= pagePixelHeight &&
+      range.top > sourceStart + 1 &&
+      range.top < desiredEnd &&
+      range.bottom > desiredEnd
+    );
+  });
+  if (!crossingRanges.length) return desiredEnd;
+
+  const safeEnd = Math.min(...crossingRanges.map((range) => range.top));
+  return safeEnd > sourceStart + 1 ? safeEnd : desiredEnd;
+}
+
 // 🛠️ สร้าง PDF จาก modal content
 function generatePDF(labId) {
   const reportContent = document.querySelector("#reportModal .bg-white");
@@ -760,6 +1074,7 @@ function generatePDF(labId) {
   const dlSection = document.getElementById("reportDownloadActions");
   const closeButton = document.getElementById("reportCloseButton");
   const timelineWrapper = document.getElementById("reportTimelineTableWrapper");
+  const trackingWrapper = document.getElementById("reportTrackingTableWrapper");
   const savedStyles = {
     maxHeight: reportContent.style.maxHeight,
     overflow: reportContent.style.overflow,
@@ -768,6 +1083,7 @@ function generatePDF(labId) {
     actionsDisplay: dlSection?.style.display || "",
     closeDisplay: closeButton?.style.display || "",
     timelineOverflow: timelineWrapper?.style.overflow || "",
+    trackingOverflow: trackingWrapper?.style.overflow || "",
   };
   const restoreReportLayout = () => {
     reportContent.style.maxHeight = savedStyles.maxHeight;
@@ -777,69 +1093,103 @@ function generatePDF(labId) {
     if (dlSection) dlSection.style.display = savedStyles.actionsDisplay;
     if (closeButton) closeButton.style.display = savedStyles.closeDisplay;
     if (timelineWrapper) timelineWrapper.style.overflow = savedStyles.timelineOverflow;
+    if (trackingWrapper) trackingWrapper.style.overflow = savedStyles.trackingOverflow;
   };
 
   reportContent.style.maxHeight = "none";
   reportContent.style.overflow = "visible";
-  reportContent.style.width = "1024px";
-  reportContent.style.maxWidth = "1024px";
+  reportContent.style.width = "1200px";
+  reportContent.style.maxWidth = "1200px";
   if (dlSection) dlSection.style.display = "none";
   if (closeButton) closeButton.style.display = "none";
   if (timelineWrapper) timelineWrapper.style.overflow = "visible";
+  if (trackingWrapper) trackingWrapper.style.overflow = "visible";
 
-  html2canvas(reportContent, { scale: 2, useCORS: true }).then((canvas) => {
-    restoreReportLayout();
+  waitForReportImages(reportContent)
+    .then(() => {
+      const contentHeight = reportContent.getBoundingClientRect().height;
+      const keepTogetherRanges = collectPdfKeepTogetherRanges(reportContent);
+      return html2canvas(reportContent, { scale: 2, useCORS: true })
+        .then((canvas) => ({
+          canvas,
+          contentHeight,
+          keepTogetherRanges,
+        }));
+    })
+    .then(({ canvas, contentHeight, keepTogetherRanges }) => {
+      restoreReportLayout();
 
-    const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF("p", "mm", "a4");
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const margin = 10;
-    const imgWidth = pageWidth - margin * 2;
-    const imgHeight = (canvas.height * imgWidth) / canvas.width;
-    const imgData = canvas.toDataURL("image/png");
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF("p", "mm", "a4");
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 10;
+      const imageWidth = pageWidth - margin * 2;
+      const pageContentHeight = pageHeight - margin * 2;
+      const pagePixelHeight =
+        (pageContentHeight / imageWidth) * canvas.width;
+      const canvasScaleY = canvas.height / Math.max(1, contentHeight);
+      const scaledRanges = keepTogetherRanges.map((range) => ({
+        top: range.top * canvasScaleY,
+        bottom: range.bottom * canvasScaleY,
+      }));
 
-    // แบ่งหน้าอัตโนมัติถ้าเนื้อหายาว
-    const pageContentHeight = pageHeight - margin * 2;
-    let yRemaining = imgHeight;
-    let sourceY = 0;
+      let sourceY = 0;
+      let pageIndex = 0;
+      while (sourceY < canvas.height) {
+        const desiredEnd = Math.min(
+          canvas.height,
+          sourceY + pagePixelHeight,
+        );
+        const safeEnd = choosePdfSliceEnd(
+          sourceY,
+          desiredEnd,
+          pagePixelHeight,
+          scaledRanges,
+        );
+        const sliceEnd = Math.max(
+          sourceY + 1,
+          Math.min(canvas.height, Math.floor(safeEnd)),
+        );
+        const slicePixelHeight = sliceEnd - sourceY;
+        const sliceHeight =
+          (slicePixelHeight * imageWidth) / canvas.width;
+        const sliceCanvas = document.createElement("canvas");
+        sliceCanvas.width = canvas.width;
+        sliceCanvas.height = slicePixelHeight;
+        const context = sliceCanvas.getContext("2d");
+        context.drawImage(
+          canvas,
+          0,
+          sourceY,
+          canvas.width,
+          slicePixelHeight,
+          0,
+          0,
+          sliceCanvas.width,
+          sliceCanvas.height,
+        );
 
-    while (yRemaining > 0) {
-      const sliceH = Math.min(yRemaining, pageContentHeight);
-      const sliceCanvas = document.createElement("canvas");
-      sliceCanvas.width = canvas.width;
-      sliceCanvas.height = (sliceH / imgWidth) * canvas.width;
-      const ctx = sliceCanvas.getContext("2d");
-      ctx.drawImage(
-        canvas,
-        0,
-        sourceY * (canvas.height / imgHeight),
-        canvas.width,
-        sliceCanvas.height,
-        0,
-        0,
-        sliceCanvas.width,
-        sliceCanvas.height,
-      );
-      pdf.addImage(
-        sliceCanvas.toDataURL("image/png"),
-        "PNG",
-        margin,
-        margin,
-        imgWidth,
-        sliceH,
-      );
-      yRemaining -= pageContentHeight;
-      sourceY += pageContentHeight;
-      if (yRemaining > 0) pdf.addPage();
-    }
+        if (pageIndex > 0) pdf.addPage();
+        pdf.addImage(
+          sliceCanvas.toDataURL("image/png"),
+          "PNG",
+          margin,
+          margin,
+          imageWidth,
+          sliceHeight,
+        );
+        sourceY = sliceEnd;
+        pageIndex += 1;
+      }
 
-    pdf.save(`ClassMood_Report_${labId}_${Date.now()}.pdf`);
-  }).catch((error) => {
-    restoreReportLayout();
-    console.error("Error generating PDF:", error);
-    alert("ไม่สามารถสร้าง PDF ได้");
-  });
+      pdf.save(`ClassMood_Report_${labId}_${Date.now()}.pdf`);
+    })
+    .catch((error) => {
+      restoreReportLayout();
+      console.error("Error generating PDF:", error);
+      alert("ไม่สามารถสร้าง PDF ได้");
+    });
 }
 
 // 🛠️ สร้าง Blob และ trigger download
@@ -876,6 +1226,8 @@ async function exportReport() {
   const modal = document.getElementById("reportModal");
   if (modal) modal.classList.remove("hidden");
   renderReportTimeline([]);
+  renderTrackingReport(null);
+  renderEvidenceReport(null);
 
   // ชื่อรอบ
   const labName =
@@ -908,6 +1260,8 @@ async function exportReport() {
     const s = latestExportData.summary || {};
     const latest = s.latest_summary || {};
     const periods = latestExportData.periods || [];
+    const tracking = latestExportData.tracking || null;
+    const session = tracking?.session || {};
     const isTimelineReport = periods.length > 0;
     const reportBehavior = isTimelineReport
       ? s.overall_summary || latest
@@ -919,6 +1273,10 @@ async function exportReport() {
     };
 
     set("reportRecords", `บันทึก: ${s.total_records ?? 0} รายการ`);
+    set(
+      "reportSessionContext",
+      `วิชา: ${session.course_name || currentCourseName || "ไม่ระบุ"} | ห้อง: ${session.room_name || currentRoomName || "ไม่ระบุ"}`,
+    );
     set("reportAvgPeople", `นักเรียนเฉลี่ย: ${s.avg_people ?? 0} คน`);
     set(
       "reportAvgAttention",
@@ -944,10 +1302,14 @@ async function exportReport() {
       `${isTimelineReport ? s.avg_attention_rate ?? 0 : s.latest_attention_rate ?? 0}%`,
     );
     renderReportTimeline(periods, latestExportData.period_seconds);
+    renderTrackingReport(tracking);
+    renderEvidenceReport(tracking);
   } catch (e) {
     console.error("Error fetching export data:", e);
     latestExportData = null;
     renderReportTimeline([]);
+    renderTrackingReport(null);
+    renderEvidenceReport(null);
     const recEl = document.getElementById("reportRecords");
     if (recEl) recEl.textContent = "ไม่สามารถโหลดข้อมูลได้";
   }
@@ -1205,6 +1567,8 @@ document.addEventListener("DOMContentLoaded", function () {
       if (event.key === "Enter") startSession();
     });
   }
+
+  resetRecordingStartInput();
 });
 
 // =============================================
@@ -1372,6 +1736,9 @@ async function setVideoSource(labId, camId, source, displayLabel = null) {
       body: JSON.stringify({
         source,
         session_name: currentSessionName || labId,
+        room_name: currentRoomName || "ไม่ระบุ",
+        course_name: currentCourseName || "ไม่ระบุ",
+        recording_start: currentRecordingStart || null,
       }),
     });
     const data = await readResponsePayload(res);

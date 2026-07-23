@@ -92,6 +92,50 @@
               />
             </div>
 
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label
+                  for="courseNameInput"
+                  class="block text-sm font-medium text-gray-700 mb-2"
+                  >รายวิชา</label
+                >
+                <input
+                  id="courseNameInput"
+                  type="text"
+                  maxlength="100"
+                  placeholder="เช่น ปัญญาประดิษฐ์"
+                  class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                />
+              </div>
+              <div>
+                <label
+                  for="roomNameInput"
+                  class="block text-sm font-medium text-gray-700 mb-2"
+                  >ห้องเรียน</label
+                >
+                <input
+                  id="roomNameInput"
+                  type="text"
+                  maxlength="100"
+                  placeholder="เช่น ห้องแล็บ 9226"
+                  class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label
+                for="recordingStartInput"
+                class="block text-sm font-medium text-gray-700 mb-2"
+                >เวลาเริ่มบันทึก</label
+              >
+              <input
+                id="recordingStartInput"
+                type="datetime-local"
+                class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-400"
+              />
+            </div>
+
             <div class="grid md:grid-cols-2 gap-3">
               <div class="border border-blue-100 bg-blue-50 rounded-lg p-4">
                 <p class="font-semibold text-blue-800">เว็บแคม</p>
@@ -130,7 +174,7 @@
               id="currentLabName"
               class="text-2xl font-bold text-gray-800"
             ></h2>
-            <p class="text-gray-600">การวิเคราะห์แบบ Real-Time</p>
+            <p id="currentSessionMeta" class="text-gray-600"></p>
           </div>
         </div>
 
@@ -276,6 +320,35 @@
               </div>
               <div class="h-48">
                 <canvas id="attentionChart"></canvas>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-lg p-6">
+              <div class="flex flex-col gap-1 mb-4 sm:flex-row sm:items-end sm:justify-between">
+                <h3 class="text-lg font-semibold text-gray-800">
+                  ผลวิเคราะห์รายบุคคล
+                </h3>
+                <span class="text-xs text-gray-500">ID ใช้เฉพาะภายในรอบนี้</span>
+              </div>
+              <p id="liveTrackEmpty" class="text-sm text-gray-500">
+                รอข้อมูลการติดตามบุคคล
+              </p>
+              <div class="overflow-x-auto">
+                <table class="w-full min-w-[760px] text-sm">
+                  <thead class="bg-gray-50 text-gray-600">
+                    <tr>
+                      <th class="px-3 py-2 text-left font-semibold">บุคคล</th>
+                      <th class="px-3 py-2 text-left font-semibold">พฤติกรรมล่าสุด</th>
+                      <th class="px-3 py-2 text-right font-semibold">เวลาที่ตรวจพบ</th>
+                      <th class="px-3 py-2 text-right font-semibold">ตั้งใจ (%)</th>
+                      <th class="px-3 py-2 text-right font-semibold">หลับ (ครั้ง)</th>
+                      <th class="px-3 py-2 text-right font-semibold">ก้มหน้า (ครั้ง)</th>
+                      <th class="px-3 py-2 text-right font-semibold">ยกมือ (ครั้ง)</th>
+                      <th class="px-3 py-2 text-right font-semibold">ยืน (ครั้ง)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="liveTrackRows"></tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -426,6 +499,9 @@
                 <p class="text-sm text-blue-600" id="reportRecords">
                   บันทึก: 0 รายการ
                 </p>
+                <p class="text-sm text-blue-600" id="reportSessionContext">
+                  วิชา: - | ห้อง: -
+                </p>
               </div>
               <div class="bg-green-50 p-4 rounded-lg">
                 <h4 class="font-semibold text-green-800">สถิติการใช้งาน</h4>
@@ -528,6 +604,62 @@
                   <tbody id="reportTimelineBody" class="divide-y divide-gray-100"></tbody>
                 </table>
               </div>
+            </div>
+
+            <div id="reportTrackingSection" class="hidden">
+              <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
+                <h4 class="font-semibold text-gray-800">
+                  สรุปรายบุคคลตามช่วงเวลา
+                </h4>
+                <span class="text-xs text-gray-500">
+                  Anonymous ID แบ่งช่วงละ 1 ชั่วโมง
+                </span>
+              </div>
+              <div
+                id="reportTrackingTableWrapper"
+                class="overflow-x-auto border border-gray-200 rounded-lg"
+              >
+                <table class="w-full min-w-[1040px] text-xs text-left">
+                  <thead class="bg-gray-100 text-gray-700">
+                    <tr>
+                      <th class="px-3 py-2 font-semibold">ช่วงเวลา</th>
+                      <th class="px-3 py-2 font-semibold">บุคคล</th>
+                      <th class="px-3 py-2 font-semibold text-right">เวลาที่ตรวจพบ</th>
+                      <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (%)</th>
+                      <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">หลับ (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">ก้มหน้า (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">ยกมือ (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">ยืน (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">ไม่ชัดเจน (ครั้ง)</th>
+                    </tr>
+                  </thead>
+                  <tbody
+                    id="reportTrackingRows"
+                    class="divide-y divide-gray-100"
+                  ></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div id="reportEvidenceSection" class="hidden">
+              <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h4 class="font-semibold text-gray-800">
+                    ภาพหลักฐานประกอบเหตุการณ์
+                  </h4>
+                  <p class="mt-1 text-xs text-gray-500">
+                    ใช้อ้างอิงภายในคาบนี้ ไม่ใช่การระบุตัวตนข้ามคาบ
+                  </p>
+                </div>
+                <span id="reportEvidenceCaption" class="text-xs text-gray-500">
+                  0 ภาพ
+                </span>
+              </div>
+              <div
+                id="reportEvidenceGallery"
+                class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+              ></div>
             </div>
 
             <div id="reportDownloadActions" class="space-y-3">

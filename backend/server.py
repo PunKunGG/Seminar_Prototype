@@ -6,9 +6,17 @@ import cv2, os, json, time, threading
 import ipaddress
 import sys
 import math
+from urllib.parse import quote
 from datetime import datetime
 from collections import deque
-from behavior_analyzer import analyze_frame, get_behavior_label_th
+from behavior_analyzer import (
+    analyze_frame,
+    get_behavior_label_en,
+    get_behavior_label_th,
+)
+from person_tracking import BEHAVIOR_KEYS, SessionTracker
+from evidence_store import EvidenceStore
+from session_database import SessionDatabase
 from video_sampling import (
     aggregate_analyses,
     build_report_periods,
@@ -100,6 +108,14 @@ _alert_id_ctr = [0]  # ใช้ list เพื่อให้ nested function �
 # 💾 Persistence — path สำหรับบันทึกข้อมูลลง disk
 DATA_DIR   = os.path.join(_base_dir, "data")
 STATS_FILE = os.path.join(DATA_DIR, "stats.json")
+SESSION_DB_FILE = os.getenv(
+    "CLASSMOOD_DATABASE_PATH",
+    os.path.join(DATA_DIR, "classmood.db"),
+)
+EVIDENCE_DIR = os.path.abspath(os.path.expanduser(os.getenv(
+    "CLASSMOOD_EVIDENCE_DIR",
+    os.path.join(DATA_DIR, "evidence"),
+)))
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 VIDEO_SOURCE_DIRS = [
     os.path.abspath(os.path.expanduser(path.strip()))
@@ -132,6 +148,38 @@ LONG_VIDEO_SAMPLE_FPS = min(
 )
 VIDEO_UPLOAD_DIR = VIDEO_SOURCE_DIRS[0]
 app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_UPLOAD_MB * 1024 * 1024
+session_database = SessionDatabase(SESSION_DB_FILE)
+evidence_store = EvidenceStore(
+    EVIDENCE_DIR,
+    jpeg_quality=_env_int("CLASSMOOD_EVIDENCE_JPEG_QUALITY", 86),
+    max_dimension=_env_int("CLASSMOOD_EVIDENCE_MAX_DIMENSION", 900),
+)
+session_trackers = {}
+tracking_last_persisted = {}
+stats_last_recorded = {}
+evidence_saved_keys = {}
+evidence_event_counts = {}
+EVIDENCE_ENABLED = _env_flag("CLASSMOOD_EVIDENCE_ENABLED", True)
+EVIDENCE_BEHAVIORS = {
+    value.strip()
+    for value in os.getenv(
+        "CLASSMOOD_EVIDENCE_BEHAVIORS",
+        "sleeping,looking_down,hand_raised,standing",
+    ).split(",")
+    if value.strip() in BEHAVIOR_KEYS
+}
+MAX_EVIDENCE_PER_TRACK = max(
+    1,
+    _env_int("CLASSMOOD_MAX_EVIDENCE_PER_TRACK", 50),
+)
+TRACKING_DB_WRITE_INTERVAL = max(
+    0.5,
+    _env_float("CLASSMOOD_TRACKING_DB_WRITE_INTERVAL", 2.0),
+)
+REALTIME_STATS_INTERVAL = max(
+    1.0,
+    _env_float("CLASSMOOD_REALTIME_STATS_INTERVAL", 4.0),
+)
 
 
 @app.errorhandler(413)
@@ -315,13 +363,298 @@ def _capture_is_current(key, buf):
     return buf.get("running", False) and frame_buffers.get(key) is buf
 
 
-def _store_buffer_frame(buf, frame, annotated_frame=None):
+def _store_buffer_frame(
+    buf,
+    frame,
+    annotated_frame=None,
+    position_seconds=None,
+):
     with buf["lock"]:
         buf["frame"] = frame
         buf["annotated_frame"] = annotated_frame
+        if position_seconds is not None:
+            buf["position_seconds"] = max(0.0, float(position_seconds))
         buf["frame_token"] += 1
         buf["count_frame"] = None
         buf["count_token"] = -1
+
+
+def _new_session_tracker(metadata):
+    if metadata.get("processing_mode") == "sampled":
+        sample_fps = max(0.1, float(metadata.get("sample_fps") or 2.0))
+        sample_interval = max(
+            10.0,
+            float(metadata.get("sample_interval_seconds") or 60),
+        )
+        return SessionTracker(
+            max_missing_seconds=sample_interval + 15,
+            observation_step_seconds=1.0 / sample_fps,
+            max_observation_gap_seconds=(1.0 / sample_fps) * 1.75,
+        )
+    return SessionTracker(
+        max_missing_seconds=max(
+            1.0,
+            _env_float("CLASSMOOD_TRACK_MAX_MISSING_SECONDS", 4.0),
+        ),
+        observation_step_seconds=1.0 / ANNOTATED_STREAM_FPS,
+        max_observation_gap_seconds=max(
+            1.0,
+            3.0 / ANNOTATED_STREAM_FPS,
+        ),
+    )
+
+
+def _get_session_tracker(lab_id, cam_id):
+    with state_lock:
+        return session_trackers.get((lab_id, cam_id))
+
+
+def _session_tracker_items(session_id):
+    with state_lock:
+        return [
+            (cam_id, tracker)
+            for (lab_id, cam_id), tracker in session_trackers.items()
+            if lab_id == session_id and tracker is not None
+        ]
+
+
+def _draw_track_labels(frame, detections):
+    if frame is None:
+        return frame
+    for detection in detections:
+        bbox = detection.get("bbox")
+        track_id = detection.get("track_id")
+        if not bbox or track_id is None:
+            continue
+        x1, y1, _, _ = map(int, bbox)
+        label = (
+            f"ID {track_id} | "
+            f"{get_behavior_label_en(detection.get('behavior', 'unknown'))}"
+        )
+        (text_width, text_height), _ = cv2.getTextSize(
+            label,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            1,
+        )
+        label_y = max(text_height + 4, y1 - 6)
+        cv2.rectangle(
+            frame,
+            (x1, label_y - text_height - 5),
+            (x1 + text_width + 6, label_y + 3),
+            (35, 35, 35),
+            cv2.FILLED,
+        )
+        cv2.putText(
+            frame,
+            label,
+            (x1 + 3, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+        )
+    return frame
+
+
+def _persist_tracking(lab_id, cam_id, force=False, full=False):
+    key = (lab_id, cam_id)
+    tracker = _get_session_tracker(lab_id, cam_id)
+    if tracker is None:
+        return
+
+    now = time.monotonic()
+    with state_lock:
+        last_write = tracking_last_persisted.get(key, 0)
+        if not force and now - last_write < TRACKING_DB_WRITE_INTERVAL:
+            return
+        tracking_last_persisted[key] = now
+
+    try:
+        session_database.sync_tracking(
+            lab_id,
+            tracker.persistence_snapshot(recent_only=not full),
+        )
+    except Exception as error:
+        print(f"Tracking database write failed for {lab_id}/{cam_id}: {error}")
+
+
+def _evidence_url(session_id, filename):
+    return (
+        f"/api/evidence/{quote(str(session_id), safe='')}/"
+        f"{quote(str(filename), safe='')}"
+    )
+
+
+def _with_evidence_urls(session_id, report):
+    for item in report.get("evidence", []):
+        item["url"] = _evidence_url(session_id, item.get("filename", ""))
+    return report
+
+
+def _capture_evidence(lab_id, cam_id, frame, detections, timestamp):
+    if not EVIDENCE_ENABLED or frame is None:
+        return
+
+    source_key = (lab_id, cam_id)
+    with state_lock:
+        saved_keys = evidence_saved_keys.setdefault(source_key, set())
+        event_counts = evidence_event_counts.setdefault(source_key, {})
+
+    pending = []
+    for detection in detections:
+        track_id = detection.get("track_id")
+        event_index = detection.get("event_index")
+        behavior = detection.get("behavior", "unknown")
+        if track_id is None:
+            continue
+
+        candidates = []
+        if detection.get("is_new_track"):
+            candidates.append(("reference", "reference", None))
+        if (
+            detection.get("event_started")
+            and behavior in EVIDENCE_BEHAVIORS
+            and event_counts.get(track_id, 0) < MAX_EVIDENCE_PER_TRACK
+        ):
+            candidates.append((
+                f"event:{event_index}",
+                "event",
+                event_index,
+            ))
+
+        for evidence_key, kind, evidence_event_index in candidates:
+            unique_key = (int(track_id), evidence_key)
+            if unique_key in saved_keys:
+                continue
+            try:
+                result = evidence_store.save_crop(
+                    session_id=lab_id,
+                    track_id=track_id,
+                    kind=kind,
+                    event_index=evidence_event_index,
+                    behavior=behavior,
+                    captured_seconds=timestamp,
+                    frame=frame,
+                    bbox=detection.get("bbox"),
+                )
+            except Exception as error:
+                print(
+                    f"Evidence image write failed for "
+                    f"{lab_id}/ID {track_id}: {error}",
+                )
+                continue
+            if result is None:
+                continue
+            pending.append({
+                "track_id": int(track_id),
+                "evidence_key": evidence_key,
+                "event_index": evidence_event_index,
+                "kind": kind,
+                "behavior": behavior,
+                "captured_seconds": timestamp,
+                **result,
+            })
+
+    if not pending:
+        return
+
+    _persist_tracking(lab_id, cam_id, force=True)
+    for item in pending:
+        try:
+            session_database.add_evidence(lab_id, **item)
+        except Exception as error:
+            path = evidence_store.resolve_file(lab_id, item["filename"])
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            print(
+                f"Evidence database write failed for "
+                f"{lab_id}/ID {item['track_id']}: {error}",
+            )
+            continue
+
+        unique_key = (item["track_id"], item["evidence_key"])
+        with state_lock:
+            evidence_saved_keys.setdefault(source_key, set()).add(unique_key)
+            if item["kind"] == "event":
+                counts = evidence_event_counts.setdefault(source_key, {})
+                counts[item["track_id"]] = counts.get(item["track_id"], 0) + 1
+
+
+def _finalize_tracking(lab_id, cam_id, timestamp=None):
+    key = (lab_id, cam_id)
+    tracker = _get_session_tracker(lab_id, cam_id)
+    if tracker is None:
+        return
+    try:
+        snapshot = tracker.finalize(timestamp)
+        session_database.sync_tracking(lab_id, snapshot)
+        session_database.finish_session(lab_id)
+    except Exception as error:
+        print(f"Tracking finalization failed for {lab_id}/{cam_id}: {error}")
+    finally:
+        with state_lock:
+            tracking_last_persisted.pop(key, None)
+
+
+def _apply_tracking(
+    lab_id,
+    cam_id,
+    analysis,
+    timestamp=None,
+    original_frame=None,
+):
+    tracker = _get_session_tracker(lab_id, cam_id)
+    if tracker is None:
+        return analysis
+
+    tracking = tracker.update(analysis.get("behaviors", []), timestamp)
+    detections = tracking["detections"]
+    summary = {key: 0 for key in BEHAVIOR_KEYS}
+    for detection in detections:
+        behavior = detection.get("behavior", "unknown")
+        summary[behavior if behavior in summary else "unknown"] += 1
+
+    total_people = len(detections)
+    attentive_people = summary["attentive"] + summary["hand_raised"]
+    analysis["behaviors"] = detections
+    analysis["track_summaries"] = tracking["active_tracks"]
+    analysis["tracking_timestamp_seconds"] = tracking["timestamp_seconds"]
+    analysis["summary"] = summary
+    analysis["total_people"] = total_people
+    analysis["attention_rate"] = round(
+        (attentive_people / total_people) * 100,
+        1,
+    ) if total_people else 0
+    analysis["annotated_frame"] = _draw_track_labels(
+        analysis.get("annotated_frame"),
+        detections,
+    )
+    _capture_evidence(
+        lab_id,
+        cam_id,
+        original_frame,
+        detections,
+        tracking["timestamp_seconds"],
+    )
+    _persist_tracking(lab_id, cam_id)
+    return analysis
+
+
+def _maybe_record_realtime_stats(lab_id, cam_id, analysis):
+    key = (lab_id, cam_id)
+    with state_lock:
+        source_state = source_states.get(key, {})
+        if source_state.get("processing_mode") == "sampled":
+            return
+        now = time.monotonic()
+        if now - stats_last_recorded.get(key, 0) < REALTIME_STATS_INTERVAL:
+            return
+        stats_last_recorded[key] = now
+    record_stats(lab_id, analysis)
 
 
 def _capture_sampled_video(key, buf, cap, metadata):
@@ -343,6 +676,7 @@ def _capture_sampled_video(key, buf, cap, metadata):
             return
 
         window_analyses = []
+        latest_analysis = None
         seek_ok = cap.set(cv2.CAP_PROP_POS_MSEC, window_start * 1000)
         if not seek_ok and window_start > 0:
             print(f"⚠️ ข้ามช่วงวิดีโอที่ seek ไม่สำเร็จ: {format_video_time(window_start)}")
@@ -367,17 +701,29 @@ def _capture_sampled_video(key, buf, cap, metadata):
             if not ok or frame is None:
                 break
 
-            analysis = analyze_frame(frame)
+            analysis = _apply_tracking(
+                lab_id,
+                cam_id,
+                analyze_frame(frame),
+                sample_time,
+                frame,
+            )
             if not _capture_is_current(key, buf):
                 return
 
+            latest_analysis = analysis
             window_analyses.append({
                 "total_people": analysis["total_people"],
                 "summary": analysis["summary"],
                 "annotated_frame": None,
             })
             processed_samples += 1
-            _store_buffer_frame(buf, frame, analysis.get("annotated_frame"))
+            _store_buffer_frame(
+                buf,
+                frame,
+                analysis.get("annotated_frame"),
+                sample_time,
+            )
             _set_cached(lab_id, cam_id, analysis)
             _set_source_state(
                 key,
@@ -392,6 +738,16 @@ def _capture_sampled_video(key, buf, cap, metadata):
 
         aggregate = aggregate_analyses(window_analyses)
         if aggregate is not None:
+            aggregate["behaviors"] = (
+                latest_analysis.get("behaviors", [])
+                if latest_analysis
+                else []
+            )
+            aggregate["track_summaries"] = (
+                latest_analysis.get("track_summaries", [])
+                if latest_analysis
+                else []
+            )
             aggregate["annotated_frame"] = _get_buffer_frame(
                 lab_id,
                 cam_id,
@@ -416,6 +772,11 @@ def _capture_sampled_video(key, buf, cap, metadata):
 
     buf["running"] = False
     buf["ended"] = True
+    _finalize_tracking(
+        lab_id,
+        cam_id,
+        metadata["duration_seconds"],
+    )
     _set_source_state(
         key,
         active=False,
@@ -470,21 +831,36 @@ def _capture_loop(key, metadata):
             if is_file:
                 buf["running"] = False
                 buf["ended"] = True
-                _set_source_state(
-                    key,
-                    active=False,
-                    ended=True,
-                    error=None,
-                    ended_at=_now_str(),
-                )
                 break
             else:
                 time.sleep(0.05)
                 continue
         if ok and frame is not None:
-            _store_buffer_frame(buf, frame)
+            position_seconds = (
+                (cap.get(cv2.CAP_PROP_POS_MSEC) or 0) / 1000
+                if is_file
+                else None
+            )
+            _store_buffer_frame(
+                buf,
+                frame,
+                position_seconds=position_seconds,
+            )
         time.sleep(0.033)  # ~30 FPS max
     cap.release()
+    if is_file and buf.get("ended"):
+        _finalize_tracking(
+            key[0],
+            key[1],
+            buf.get("position_seconds"),
+        )
+        _set_source_state(
+            key,
+            active=False,
+            ended=True,
+            error=None,
+            ended_at=_now_str(),
+        )
     print(f"🛑 ปิด {'วิดีโอ' if is_file else 'เว็บแคม'} {key}")
 
 
@@ -500,12 +876,19 @@ def _start_capture(lab_id, cam_id, source, metadata=None):
         "count_frame": None,
         "frame_token": 0,
         "count_token": -1,
+        "position_seconds": 0.0,
         "lock": threading.Lock(),
         "running": True,
         "thread": None,
         "ended": False,
     }
     frame_buffers[key] = buf
+    with state_lock:
+        session_trackers[key] = _new_session_tracker(metadata)
+        tracking_last_persisted.pop(key, None)
+        stats_last_recorded.pop(key, None)
+        evidence_saved_keys[key] = set()
+        evidence_event_counts[key] = {}
     state = _set_source_state(
         key,
         source=source,
@@ -534,12 +917,22 @@ def _stop_capture(lab_id, cam_id):
         t = frame_buffers[key].get("thread")
         if t and t.is_alive():
             t.join(timeout=2.0)
+        _finalize_tracking(
+            lab_id,
+            cam_id,
+            frame_buffers[key].get("position_seconds"),
+        )
         del frame_buffers[key]
     video_sources.pop(key, None)
     with state_lock:
         source_states.pop(key, None)
         analysis_cache.pop(key, None)
         analysis_locks.pop(key, None)
+        session_trackers.pop(key, None)
+        tracking_last_persisted.pop(key, None)
+        stats_last_recorded.pop(key, None)
+        evidence_saved_keys.pop(key, None)
+        evidence_event_counts.pop(key, None)
 
 
 def _get_buffer_frame(lab_id, cam_id, field="frame"):
@@ -555,6 +948,18 @@ def _get_buffer_frame(lab_id, cam_id, field="frame"):
 def get_live_frame(lab_id, cam_id):
     """คืน frame ล่าสุดจาก buffer หรือ None ถ้าไม่มี live source"""
     return _get_buffer_frame(lab_id, cam_id, "frame")
+
+
+def _source_observation_time(lab_id, cam_id):
+    key = (lab_id, cam_id)
+    source = video_sources.get(key)
+    if not isinstance(source, str):
+        return None
+    buf = frame_buffers.get(key)
+    if not buf:
+        return None
+    with buf["lock"]:
+        return float(buf.get("position_seconds") or 0)
 
 
 def _read_frame(lab_id, cam_id):
@@ -609,9 +1014,15 @@ def _get_or_analyze(lab_id, cam_id, frame=None):
             if err:
                 return None, False, err
 
-        analysis = analyze_frame(frame)
+        analysis = _apply_tracking(
+            lab_id,
+            cam_id,
+            analyze_frame(frame),
+            _source_observation_time(lab_id, cam_id),
+            frame,
+        )
         _set_cached(lab_id, cam_id, analysis)
-        record_stats(lab_id, analysis)
+        _maybe_record_realtime_stats(lab_id, cam_id, analysis)
         return analysis, True, None
 
 
@@ -641,9 +1052,19 @@ def _annotate_count_frame(frame):
     return annotated_frame
 
 
-def _annotate_stream_frame(frame, mode):
+def _annotate_stream_frame(lab_id, cam_id, frame, mode):
     if mode == "behavior":
-        analysis = analyze_frame(frame)
+        analysis_lock = _get_analysis_lock(lab_id, cam_id)
+        with analysis_lock:
+            analysis = _apply_tracking(
+                lab_id,
+                cam_id,
+                analyze_frame(frame),
+                _source_observation_time(lab_id, cam_id),
+                frame,
+            )
+            _set_cached(lab_id, cam_id, analysis)
+            _maybe_record_realtime_stats(lab_id, cam_id, analysis)
         annotated_frame = analysis.get("annotated_frame")
         return annotated_frame if annotated_frame is not None else frame
     return _annotate_count_frame(frame)
@@ -817,14 +1238,56 @@ def get_behavior_analysis(lab_id, cam_id):
         "total_people": analysis["total_people"],
         "attention_rate": analysis["attention_rate"],
         "summary": analysis["summary"],
+        "tracks": analysis.get("track_summaries", []),
         "behaviors": [
             {
                 "behavior": b["behavior"],
                 "behavior_th": get_behavior_label_th(b["behavior"]),
-                "confidence": b["confidence"]
-            } for b in analysis["behaviors"]
+                "raw_behavior": b.get("raw_behavior", b["behavior"]),
+                "confidence": b["confidence"],
+                "track_id": b.get("track_id"),
+                "bbox": b.get("bbox"),
+                "track_attention_rate": b.get("track_attention_rate", 0),
+            } for b in analysis.get("behaviors", [])
         ]
     })
+
+
+@app.route("/api/sessions/<session_id>/tracks")
+def get_session_tracks(session_id):
+    try:
+        period_seconds = int(request.args.get("period_seconds", 3600))
+    except ValueError:
+        period_seconds = 3600
+    for cam_id, _tracker in _session_tracker_items(session_id):
+        _persist_tracking(session_id, cam_id, force=True)
+    return jsonify(
+        _with_evidence_urls(
+            session_id,
+            session_database.tracking_report(
+                session_id,
+                period_seconds=period_seconds,
+            ),
+        ),
+    )
+
+
+@app.route("/api/evidence/<session_id>/<path:filename>")
+def get_evidence_image(session_id, filename):
+    blocked = _require_local_source_access()
+    if blocked:
+        return blocked
+
+    path = evidence_store.resolve_file(session_id, filename)
+    if path is None or not os.path.isfile(path):
+        return jsonify({"error": "Evidence image not found"}), 404
+    return send_from_directory(
+        evidence_store.session_directory(session_id),
+        filename,
+        mimetype="image/jpeg",
+        conditional=True,
+        max_age=0,
+    )
 
 
 # ✅ API 4: ส่งภาพพร้อม behavior annotation
@@ -959,6 +1422,15 @@ def export_lab_data(lab_id):
     latest = history[-1] if history else None
     overall = aggregate_analyses(history)
     periods = build_report_periods(history)
+    for cam_id, _tracker in _session_tracker_items(lab_id):
+        _persist_tracking(lab_id, cam_id, force=True)
+    tracking_report = _with_evidence_urls(
+        lab_id,
+        session_database.tracking_report(
+            lab_id,
+            period_seconds=3600,
+        ),
+    )
 
     return jsonify({
         "lab_id": lab_id,
@@ -982,6 +1454,7 @@ def export_lab_data(lab_id):
         },
         "period_seconds": 600 if periods else None,
         "periods": periods,
+        "tracking": tracking_report,
         "history": history,
         "activities": activities
     })
@@ -1079,7 +1552,12 @@ def _gen_annotated_mjpeg(lab_id, cam_id, mode):
             if source_state.get("processing_mode") == "sampled":
                 annotated_frame = _sampled_stream_frame(lab_id, cam_id, frame, mode)
             else:
-                annotated_frame = _annotate_stream_frame(frame, mode)
+                annotated_frame = _annotate_stream_frame(
+                    lab_id,
+                    cam_id,
+                    frame,
+                    mode,
+                )
         except Exception as e:
             print(f"⚠️ annotated stream วิเคราะห์เฟรมไม่สำเร็จ: {e}")
             annotated_frame = frame
@@ -1209,6 +1687,28 @@ def set_source(lab_id, cam_id):
         return jsonify({"error": f"ไม่สามารถเปิดได้: {label}"}), 400
     metadata = _probe_source(test_cap, source)
     test_cap.release()
+
+    _stop_capture(lab_id, cam_id)
+    try:
+        evidence_store.clear_session(lab_id)
+        session_database.upsert_session(
+            lab_id,
+            name=_session_label(lab_id),
+            room_name=body.get("room_name"),
+            course_name=body.get("course_name"),
+            source_type=_source_type(source),
+            source_label=(
+                os.path.basename(source)
+                if isinstance(source, str)
+                else f"Webcam {source}"
+            ),
+            recording_started_at=body.get("recording_start"),
+            reset_tracking=True,
+        )
+    except Exception as error:
+        return jsonify({
+            "error": f"Unable to create analysis session: {error}",
+        }), 500
 
     source_state = _start_capture(lab_id, cam_id, source, metadata)
     payload = {

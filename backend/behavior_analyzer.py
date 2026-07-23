@@ -371,8 +371,21 @@ def analyze_frame(frame: np.ndarray) -> dict:
                        "looking_down": 0, "hand_raised": 0,
                        "standing": 0, "unknown": 0}
 
-    for kp in keypoints_data:
+    box_rows = boxes.xyxy.cpu().numpy() if boxes is not None else []
+    box_confidences = boxes.conf.cpu().numpy() if boxes is not None else []
+
+    for index, kp in enumerate(keypoints_data):
         analysis = analyze_pose(kp)
+        if index < len(box_rows):
+            analysis["bbox"] = [
+                round(float(value), 2)
+                for value in box_rows[index]
+            ]
+        if index < len(box_confidences):
+            analysis["detection_confidence"] = round(
+                float(box_confidences[index]) * 100,
+                1,
+            )
         behaviors.append(analysis)
         beh = analysis["behavior"]
         if beh in behavior_counts:

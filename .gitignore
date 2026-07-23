@@ -33,6 +33,8 @@ backend/video_sources/
 
 # Runtime analysis data
 backend/data/stats.json
+backend/data/classmood.db*
+backend/data/evidence/
 
 # Environment variables
 .env

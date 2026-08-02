@@ -1,21 +1,28 @@
+from collections import deque
+from datetime import datetime
+import ipaddress
+import json
+import math
+import os
+import sys
+import threading
+import time
+from urllib.parse import quote
+
+import cv2
 from flask import Flask, jsonify, send_from_directory, Response, request
 from flask_cors import CORS
 from ultralytics import YOLO
 from werkzeug.utils import secure_filename
-import cv2, os, json, time, threading
-import ipaddress
-import sys
-import math
-from urllib.parse import quote
-from datetime import datetime
-from collections import deque
+
+from app_config import CONFIG, first_existing_path
 from behavior_analyzer import (
     analyze_frame,
     get_behavior_label_en,
     get_behavior_label_th,
 )
-from person_tracking import BEHAVIOR_KEYS, SessionTracker
 from evidence_store import EvidenceStore
+from person_tracking import BEHAVIOR_KEYS, SessionTracker
 from session_database import SessionDatabase
 from video_sampling import (
     aggregate_analyses,
@@ -24,6 +31,7 @@ from video_sampling import (
     iter_sample_windows,
     iter_sequential_decode_steps,
 )
+from video_source_policy import VideoSourcePolicy
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -32,58 +40,15 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-app = Flask(__name__, static_folder="../dashboard")
-_base_dir = os.path.dirname(os.path.abspath(__file__))
-_project_root = os.path.abspath(os.path.join(_base_dir, os.pardir))
-
-_default_allowed_origins = "http://127.0.0.1:5000,http://localhost:5000"
-ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CLASSMOOD_ALLOWED_ORIGINS", _default_allowed_origins).split(",")
-    if origin.strip()
-]
-CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS}})
-
-
-def _env_flag(name, default=False):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name, default):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def _env_float(name, default):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-def _first_existing_path(*paths):
-    for path in paths:
-        if path and os.path.exists(path):
-            return path
-    return None
+app = Flask(__name__, static_folder=CONFIG.dashboard_dir)
+CORS(app, resources={r"/api/*": {"origins": CONFIG.allowed_origins}})
 
 # โหลดโมเดล YOLO สำหรับตรวจจับคน — ลอง yolov8s ก่อน fallback ไป nano
-_detection_model_path = _first_existing_path(
-    os.path.join(_base_dir, "yolov8s.pt"),
-    os.path.join(_project_root, "yolov8s.pt"),
-    os.path.join(_base_dir, "yolov8n.pt"),
-    os.path.join(_project_root, "yolov8n.pt"),
+_detection_model_path = first_existing_path(
+    os.path.join(CONFIG.base_dir, "yolov8s.pt"),
+    os.path.join(CONFIG.project_root, "yolov8s.pt"),
+    os.path.join(CONFIG.base_dir, "yolov8n.pt"),
+    os.path.join(CONFIG.project_root, "yolov8n.pt"),
 )
 model = YOLO(_detection_model_path or "yolov8n.pt")
 model.classes = [0]  # เฉพาะ class คน
@@ -93,98 +58,53 @@ detection_lock = threading.Lock()
 stats_history = {}  # {lab_id: deque of stats}
 activity_log = {}   # {lab_id: deque of activities}
 session_names = {}  # {lab_id: display name from frontend}
-MAX_HISTORY = max(30, _env_int("CLASSMOOD_MAX_HISTORY", 480))
 state_lock = threading.RLock()
 
 # 🔄 Inference cache — ป้องกัน double inference (behavior-frame + behavior ต่อ tick เดียวกัน)
 analysis_cache = {}   # { (lab_id, cam_id): {"result": dict, "ts": float} }
 analysis_locks = {}   # { (lab_id, cam_id): Lock }
-CACHE_TTL = 4.0       # วินาที (มากกว่า poll interval 2s เล็กน้อย)
 
 # 🔔 Alerts — รายการแจ้งเตือนสำหรับ frontend
 alerts_list = []
 _alert_id_ctr = [0]  # ใช้ list เพื่อให้ nested function แก้ไขได้
 
-# 💾 Persistence — path สำหรับบันทึกข้อมูลลง disk
-DATA_DIR   = os.path.join(_base_dir, "data")
-STATS_FILE = os.path.join(DATA_DIR, "stats.json")
-SESSION_DB_FILE = os.getenv(
-    "CLASSMOOD_DATABASE_PATH",
-    os.path.join(DATA_DIR, "classmood.db"),
+# Runtime services and in-memory state
+app.config["MAX_CONTENT_LENGTH"] = (
+    CONFIG.max_video_upload_mb * 1024 * 1024
 )
-EVIDENCE_DIR = os.path.abspath(os.path.expanduser(os.getenv(
-    "CLASSMOOD_EVIDENCE_DIR",
-    os.path.join(DATA_DIR, "evidence"),
-)))
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
-VIDEO_SOURCE_DIRS = [
-    os.path.abspath(os.path.expanduser(path.strip()))
-    for path in os.getenv(
-        "CLASSMOOD_VIDEO_DIRS",
-        os.path.join(_base_dir, "video_sources"),
-    ).split(os.pathsep)
-    if path.strip()
-]
-if not VIDEO_SOURCE_DIRS:
-    VIDEO_SOURCE_DIRS = [os.path.abspath(os.path.join(_base_dir, "video_sources"))]
-MAX_WEBCAM_INDEX = _env_int("CLASSMOOD_MAX_WEBCAM_INDEX", 9)
-MAX_VIDEO_UPLOAD_MB = max(1, _env_int("CLASSMOOD_MAX_VIDEO_UPLOAD_MB", 512))
-ANNOTATED_STREAM_FPS = min(5, max(1, _env_int("CLASSMOOD_ANNOTATED_STREAM_FPS", 5)))
-LONG_VIDEO_THRESHOLD_SECONDS = max(
-    60,
-    _env_int("CLASSMOOD_LONG_VIDEO_THRESHOLD_SECONDS", 30 * 60),
-)
-LONG_VIDEO_SAMPLE_INTERVAL_SECONDS = max(
-    10,
-    _env_int("CLASSMOOD_LONG_VIDEO_SAMPLE_INTERVAL_SECONDS", 60),
-)
-LONG_VIDEO_SAMPLE_WINDOW_SECONDS = min(
-    LONG_VIDEO_SAMPLE_INTERVAL_SECONDS,
-    max(1, _env_int("CLASSMOOD_LONG_VIDEO_SAMPLE_WINDOW_SECONDS", 10)),
-)
-LONG_VIDEO_SAMPLE_FPS = min(
-    5.0,
-    max(0.1, _env_float("CLASSMOOD_LONG_VIDEO_SAMPLE_FPS", 2.0)),
-)
-VIDEO_UPLOAD_DIR = VIDEO_SOURCE_DIRS[0]
-app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_UPLOAD_MB * 1024 * 1024
-session_database = SessionDatabase(SESSION_DB_FILE)
+session_database = SessionDatabase(CONFIG.session_database_file)
 evidence_store = EvidenceStore(
-    EVIDENCE_DIR,
-    jpeg_quality=_env_int("CLASSMOOD_EVIDENCE_JPEG_QUALITY", 86),
-    max_dimension=_env_int("CLASSMOOD_EVIDENCE_MAX_DIMENSION", 900),
+    CONFIG.evidence_dir,
+    jpeg_quality=CONFIG.evidence_jpeg_quality,
+    max_dimension=CONFIG.evidence_max_dimension,
+)
+video_source_policy = VideoSourcePolicy(
+    max_webcam_index=CONFIG.max_webcam_index,
+    video_extensions=CONFIG.video_extensions,
+    source_directories=CONFIG.video_source_dirs,
+    upload_directory=CONFIG.video_upload_dir,
+    filename_sanitizer=secure_filename,
 )
 session_trackers = {}
 tracking_last_persisted = {}
 stats_last_recorded = {}
 evidence_saved_keys = {}
 evidence_event_counts = {}
-EVIDENCE_ENABLED = _env_flag("CLASSMOOD_EVIDENCE_ENABLED", True)
 EVIDENCE_BEHAVIORS = {
-    value.strip()
-    for value in os.getenv(
-        "CLASSMOOD_EVIDENCE_BEHAVIORS",
-        "sleeping,looking_down,hand_raised,standing",
-    ).split(",")
-    if value.strip() in BEHAVIOR_KEYS
+    value
+    for value in CONFIG.evidence_behaviors
+    if value in BEHAVIOR_KEYS
 }
-MAX_EVIDENCE_PER_TRACK = max(
-    1,
-    _env_int("CLASSMOOD_MAX_EVIDENCE_PER_TRACK", 50),
-)
-TRACKING_DB_WRITE_INTERVAL = max(
-    0.5,
-    _env_float("CLASSMOOD_TRACKING_DB_WRITE_INTERVAL", 2.0),
-)
-REALTIME_STATS_INTERVAL = max(
-    1.0,
-    _env_float("CLASSMOOD_REALTIME_STATS_INTERVAL", 4.0),
-)
 
 
 @app.errorhandler(413)
 def upload_too_large(_error):
-    return jsonify({"error": f"Video file is larger than {MAX_VIDEO_UPLOAD_MB} MB"}), 413
+    return jsonify({
+        "error": (
+            "Video file is larger than "
+            f"{CONFIG.max_video_upload_mb} MB"
+        ),
+    }), 413
 
 
 def _is_loopback_request():
@@ -200,81 +120,32 @@ def _is_loopback_request():
 
 
 def _require_local_source_access():
-    if _env_flag("CLASSMOOD_ALLOW_REMOTE_SOURCE_CONTROL"):
+    if CONFIG.allow_remote_source_control:
         return None
     if _is_loopback_request():
         return None
     return jsonify({"error": "Source management is limited to localhost"}), 403
 
 
-def _is_path_inside(path, roots):
-    norm_path = os.path.normcase(os.path.abspath(path))
-    for root in roots:
-        norm_root = os.path.normcase(os.path.abspath(root))
-        try:
-            if os.path.commonpath([norm_path, norm_root]) == norm_root:
-                return True
-        except ValueError:
-            continue
-    return False
-
-
 def _normalize_video_source(source):
-    if isinstance(source, bool):
-        return None, "Source must be a webcam index or a video file path"
-
-    if isinstance(source, int):
-        if 0 <= source <= MAX_WEBCAM_INDEX:
-            return source, None
-        return None, f"Webcam index must be between 0 and {MAX_WEBCAM_INDEX}"
-
-    if not isinstance(source, str):
-        return None, "Source must be a webcam index or a video file path"
-
-    raw_source = source.strip()
-    if raw_source.isdigit():
-        return _normalize_video_source(int(raw_source))
-
-    if "://" in raw_source:
-        return None, "Network video URLs are disabled by default"
-
-    path = os.path.abspath(os.path.expanduser(raw_source))
-    ext = os.path.splitext(path)[1].lower()
-    if ext not in VIDEO_EXTENSIONS:
-        return None, f"Video file must use one of: {', '.join(sorted(VIDEO_EXTENSIONS))}"
-    if not os.path.exists(path):
-        return None, f"Video file not found: {path}"
-    if not _env_flag("CLASSMOOD_ALLOW_ANY_VIDEO_PATH") and not _is_path_inside(path, VIDEO_SOURCE_DIRS):
-        allowed = ", ".join(VIDEO_SOURCE_DIRS)
-        return None, f"Video file must be inside allowed directories: {allowed}"
-    return path, None
+    return video_source_policy.normalize(
+        source,
+        allow_any_path=CONFIG.allow_any_video_path,
+    )
 
 
 def _build_upload_path(filename):
-    original_name = os.path.basename(filename or "")
-    original_stem, ext = os.path.splitext(original_name)
-    ext = ext.lower()
-    if ext not in VIDEO_EXTENSIONS:
-        return None, f"Video file must use one of: {', '.join(sorted(VIDEO_EXTENSIONS))}"
-
-    stem = secure_filename(original_stem) or "uploaded_video"
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    candidate = os.path.abspath(os.path.join(VIDEO_UPLOAD_DIR, f"{stem}_{stamp}{ext}"))
-    counter = 1
-    while os.path.exists(candidate):
-        candidate = os.path.abspath(os.path.join(VIDEO_UPLOAD_DIR, f"{stem}_{stamp}_{counter}{ext}"))
-        counter += 1
-
-    if not _is_path_inside(candidate, [VIDEO_UPLOAD_DIR]):
-        return None, "Invalid upload filename"
-    return candidate, None
+    return video_source_policy.build_upload_path(filename)
 
 
 def _get_image_path(lab_id, cam_id):
     """หา path รูปภาพ รองรับ .png/.PNG"""
-    base = os.path.dirname(os.path.abspath(__file__))
     for ext in (".png", ".PNG"):
-        p = os.path.join(base, "test_images", f"{lab_id}_{cam_id}{ext}")
+        p = os.path.join(
+            CONFIG.base_dir,
+            "test_images",
+            f"{lab_id}_{cam_id}{ext}",
+        )
         if os.path.exists(p):
             return p
     return None
@@ -285,7 +156,10 @@ def _get_cached(lab_id, cam_id):
         entry = analysis_cache.get((lab_id, cam_id))
         source_state = source_states.get((lab_id, cam_id), {})
         is_sampled_video = source_state.get("processing_mode") == "sampled"
-        if entry and (is_sampled_video or (time.time() - entry["ts"]) < CACHE_TTL):
+        if entry and (
+            is_sampled_video
+            or (time.time() - entry["ts"]) < CONFIG.cache_ttl
+        ):
             return entry["result"]
     return None
 
@@ -348,13 +222,22 @@ def _probe_source(cap, source):
         "fps": round(fps, 3) if fps > 0 else None,
         "frame_count": frame_count if frame_count > 0 else None,
     })
-    if duration is not None and duration >= LONG_VIDEO_THRESHOLD_SECONDS:
+    if (
+        duration is not None
+        and duration >= CONFIG.long_video_threshold_seconds
+    ):
         metadata.update({
             "processing_mode": "sampled",
-            "sample_interval_seconds": LONG_VIDEO_SAMPLE_INTERVAL_SECONDS,
-            "sample_window_seconds": LONG_VIDEO_SAMPLE_WINDOW_SECONDS,
-            "sample_fps": LONG_VIDEO_SAMPLE_FPS,
-            "total_windows": int(math.ceil(duration / LONG_VIDEO_SAMPLE_INTERVAL_SECONDS)),
+            "sample_interval_seconds": (
+                CONFIG.long_video_sample_interval_seconds
+            ),
+            "sample_window_seconds": (
+                CONFIG.long_video_sample_window_seconds
+            ),
+            "sample_fps": CONFIG.long_video_sample_fps,
+            "total_windows": int(math.ceil(
+                duration / CONFIG.long_video_sample_interval_seconds,
+            )),
         })
     return metadata
 
@@ -394,12 +277,12 @@ def _new_session_tracker(metadata):
     return SessionTracker(
         max_missing_seconds=max(
             1.0,
-            _env_float("CLASSMOOD_TRACK_MAX_MISSING_SECONDS", 4.0),
+            CONFIG.track_max_missing_seconds,
         ),
-        observation_step_seconds=1.0 / ANNOTATED_STREAM_FPS,
+        observation_step_seconds=1.0 / CONFIG.annotated_stream_fps,
         max_observation_gap_seconds=max(
             1.0,
-            3.0 / ANNOTATED_STREAM_FPS,
+            3.0 / CONFIG.annotated_stream_fps,
         ),
     )
 
@@ -466,7 +349,10 @@ def _persist_tracking(lab_id, cam_id, force=False, full=False):
     now = time.monotonic()
     with state_lock:
         last_write = tracking_last_persisted.get(key, 0)
-        if not force and now - last_write < TRACKING_DB_WRITE_INTERVAL:
+        if (
+            not force
+            and now - last_write < CONFIG.tracking_db_write_interval
+        ):
             return
         tracking_last_persisted[key] = now
 
@@ -493,7 +379,7 @@ def _with_evidence_urls(session_id, report):
 
 
 def _capture_evidence(lab_id, cam_id, frame, detections, timestamp):
-    if not EVIDENCE_ENABLED or frame is None:
+    if not CONFIG.evidence_enabled or frame is None:
         return
 
     source_key = (lab_id, cam_id)
@@ -515,7 +401,8 @@ def _capture_evidence(lab_id, cam_id, frame, detections, timestamp):
         if (
             detection.get("event_started")
             and behavior in EVIDENCE_BEHAVIORS
-            and event_counts.get(track_id, 0) < MAX_EVIDENCE_PER_TRACK
+            and event_counts.get(track_id, 0)
+            < CONFIG.max_evidence_per_track
         ):
             candidates.append((
                 f"event:{event_index}",
@@ -651,7 +538,10 @@ def _maybe_record_realtime_stats(lab_id, cam_id, analysis):
         if source_state.get("processing_mode") == "sampled":
             return
         now = time.monotonic()
-        if now - stats_last_recorded.get(key, 0) < REALTIME_STATS_INTERVAL:
+        if (
+            now - stats_last_recorded.get(key, 0)
+            < CONFIG.realtime_stats_interval
+        ):
             return
         stats_last_recorded[key] = now
     record_stats(lab_id, analysis)
@@ -1127,7 +1017,7 @@ def push_alert(lab_id, alert_type, message):
 
 def save_stats():
     """บันทึก stats_history และ activity_log ลง disk"""
-    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(CONFIG.data_dir, exist_ok=True)
     try:
         with state_lock:
             payload = {
@@ -1135,7 +1025,7 @@ def save_stats():
                 "activity_log":  {k: list(v) for k, v in activity_log.items()},
                 "session_names": dict(session_names),
             }
-            with open(STATS_FILE, "w", encoding="utf-8") as f:
+            with open(CONFIG.stats_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ บันทึกข้อมูลล้มเหลว: {e}")
@@ -1143,14 +1033,17 @@ def save_stats():
 
 def load_stats():
     """โหลดข้อมูลเดิมจาก disk เมื่อ server เริ่ม"""
-    if not os.path.exists(STATS_FILE):
+    if not os.path.exists(CONFIG.stats_file):
         return
     try:
-        with open(STATS_FILE, "r", encoding="utf-8") as f:
+        with open(CONFIG.stats_file, "r", encoding="utf-8") as f:
             data = json.load(f)
         with state_lock:
             for lab_id, items in data.get("stats_history", {}).items():
-                stats_history[lab_id] = deque(items, maxlen=MAX_HISTORY)
+                stats_history[lab_id] = deque(
+                    items,
+                    maxlen=CONFIG.max_history,
+                )
             for lab_id, items in data.get("activity_log", {}).items():
                 activity_log[lab_id] = deque(items, maxlen=20)
             session_names.update(data.get("session_names", {}))
@@ -1371,7 +1264,7 @@ def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None)
     with state_lock:
         session_label = _session_label(lab_id)
         if lab_id not in stats_history:
-            stats_history[lab_id] = deque(maxlen=MAX_HISTORY)
+            stats_history[lab_id] = deque(maxlen=CONFIG.max_history)
         if lab_id not in activity_log:
             activity_log[lab_id] = deque(maxlen=20)
 
@@ -1522,7 +1415,7 @@ def _gen_mjpeg(lab_id, cam_id):
 def _gen_annotated_mjpeg(lab_id, cam_id, mode):
     """Generator สำหรับ MJPEG stream ที่วาด annotation แล้ว"""
     idle = 0
-    delay = 1 / ANNOTATED_STREAM_FPS
+    delay = 1 / CONFIG.annotated_stream_fps
     mode = "behavior" if mode == "behavior" else "count"
 
     while True:
@@ -1605,7 +1498,7 @@ def upload_video():
     if path_error:
         return jsonify({"error": path_error}), 400
 
-    os.makedirs(VIDEO_UPLOAD_DIR, exist_ok=True)
+    os.makedirs(CONFIG.video_upload_dir, exist_ok=True)
     try:
         video_file.save(target_path)
     except Exception as e:
@@ -1615,7 +1508,7 @@ def upload_video():
         "ok": True,
         "filename": os.path.basename(target_path),
         "source": target_path,
-        "max_upload_mb": MAX_VIDEO_UPLOAD_MB,
+        "max_upload_mb": CONFIG.max_video_upload_mb,
     })
 
 
@@ -1762,8 +1655,8 @@ def static_files(path):
 
 if __name__ == "__main__":
     app.run(
-        host=os.getenv("CLASSMOOD_HOST", "127.0.0.1"),
-        port=_env_int("CLASSMOOD_PORT", 5000),
-        debug=_env_flag("CLASSMOOD_DEBUG"),
+        host=CONFIG.host,
+        port=CONFIG.port,
+        debug=CONFIG.debug,
         threaded=True,
     )

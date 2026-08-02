@@ -24,18 +24,22 @@
 ```text
 Seminar_Prototype/
 ├── backend/
-│   ├── server.py              # Flask server และ API หลัก
+│   ├── server.py              # ประกอบ services, จัดการ runtime state และ API หลัก
+│   ├── app_config.py          # อ่านและตรวจค่าตั้งจาก environment
+│   ├── video_source_policy.py # ตรวจ webcam/path และสร้างชื่อไฟล์อัปโหลดอย่างปลอดภัย
 │   ├── behavior_analyzer.py   # วิเคราะห์ pose และพฤติกรรม
 │   ├── person_tracking.py      # ติดตาม ID และรวมเหตุการณ์พฤติกรรม
 │   ├── session_database.py     # จัดเก็บห้อง วิชา คาบ และผลราย ID ด้วย SQLite
 │   ├── video_sampling.py       # สุ่มช่วงและรวมผลสำหรับคลิปยาว
+│   ├── evidence_store.py       # crop และจัดเก็บภาพหลักฐานของแต่ละ ID
 │   ├── detector.py            # ตัวช่วยตรวจจับวัตถุ/คน
 │   ├── data/                  # stats, SQLite และภาพหลักฐาน (ignored)
 │   ├── test_images/           # รูปทดสอบเก่าหรือ fallback
 │   └── video_sources/         # วิดีโอที่อัปโหลดผ่านเว็บ (ignored)
 ├── dashboard/
 │   ├── index.html             # หน้าเว็บหลัก
-│   ├── shared.js              # logic ฝั่ง frontend
+│   ├── shared.js              # session, live view, chart และ report data
+│   ├── report-pdf.js          # สร้าง PDF และจัดการการแบ่งหน้า
 │   ├── style.css              # style เพิ่มเติม
 │   └── asset/                 # รูป/โลโก้
 ├── requirements.txt

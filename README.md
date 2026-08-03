@@ -17,6 +17,7 @@
 - คลิปวิดีโอจะไม่วนซ้ำ เมื่อคลิปจบ ระบบจะเปิดหน้ารายงานให้อัตโนมัติ
 - แสดงกราฟความตั้งใจเรียนและสัดส่วนพฤติกรรมแบบ real time
 - ส่งออกรายงานเป็น PDF, Excel, CSV หรือ JSON
+- ล็อกอินบัญชีอาจารย์ด้วย Supabase Auth ก่อนเรียก API หรือเปิดวิดีโอสตรีม
 - เก็บข้อมูล runtime ไว้เฉพาะเครื่อง ไม่ควร commit ขึ้น repo
 
 ## โครงสร้างโปรเจกต์
@@ -26,6 +27,7 @@ Seminar_Prototype/
 ├── backend/
 │   ├── server.py              # ประกอบ services, จัดการ runtime state และ API หลัก
 │   ├── app_config.py          # อ่านและตรวจค่าตั้งจาก environment
+│   ├── auth_service.py        # ตรวจ Supabase access token และดูแล session secret
 │   ├── video_source_policy.py # ตรวจ webcam/path และสร้างชื่อไฟล์อัปโหลดอย่างปลอดภัย
 │   ├── behavior_analyzer.py   # วิเคราะห์ pose และพฤติกรรม
 │   ├── person_tracking.py      # ติดตาม ID และรวมเหตุการณ์พฤติกรรม
@@ -38,11 +40,13 @@ Seminar_Prototype/
 │   └── video_sources/         # วิดีโอที่อัปโหลดผ่านเว็บ (ignored)
 ├── dashboard/
 │   ├── index.html             # หน้าเว็บหลัก
+│   ├── auth.js                # Login/Logout และแลก token เป็น Flask session
 │   ├── shared.js              # session, live view, chart และ report data
 │   ├── report-pdf.js          # สร้าง PDF และจัดการการแบ่งหน้า
 │   ├── style.css              # style เพิ่มเติม
 │   └── asset/                 # รูป/โลโก้
 ├── requirements.txt
+├── supabase/migrations/       # schema, RLS policies และ Storage buckets
 ├── tests/
 ├── .gitignore
 └── README.md
@@ -58,6 +62,8 @@ Seminar_Prototype/
 - `backend/data/stats.json`
 - `backend/data/classmood.db*`
 - `backend/data/evidence/`
+- `backend/data/session_secret`
+- `.env`, `.env.local`
 - `__pycache__/`
 
 ถ้า `backend/data/stats.json` เคยถูก track ไปแล้ว ให้เลิก track ด้วยคำสั่งนี้ครั้งเดียว:
@@ -120,7 +126,10 @@ Dependencies หลักอยู่ใน `requirements.txt`:
 - Flask-CORS
 - Ultralytics
 - OpenCV
-- NumPy
+- NumPy 1.x สำหรับ OpenCV 4.9
+- PyTorch 2.5.1 และ Torchvision 0.20.1 สำหรับ checkpoint ของ YOLO รุ่นปัจจุบัน
+
+เวอร์ชัน NumPy, PyTorch และ Torchvision ถูกจำกัดไว้ใน `requirements.txt` โดยตั้งใจ การปล่อยให้ pip เลือกรุ่นล่าสุดอาจทำให้ OpenCV import ไม่ได้หรือ Ultralytics 8.1 โหลดไฟล์โมเดลเดิมไม่สำเร็จ
 
 ### 4. เตรียมไฟล์โมเดล YOLO
 
@@ -145,6 +154,30 @@ Seminar_Prototype/
 ```
 
 หมายเหตุ: ไฟล์ `.pt` ถูก ignore เพราะมีขนาดใหญ่ จึงต้องดาวน์โหลดหรือคัดลอกมาเองหลัง clone repo
+
+### 5. ตั้งค่า Supabase Auth
+
+คัดลอกไฟล์ตัวอย่างเป็น `.env`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+ใส่ค่า `SUPABASE_URL` และ `SUPABASE_PUBLISHABLE_KEY` จากหน้า Supabase
+`Project Settings > API Keys` ห้ามนำ Secret key, service-role key หรือรหัสผ่านฐานข้อมูลมาใส่ในไฟล์นี้
+
+จากนั้นไปที่ `Authentication > Users` ใน Supabase แล้วสร้างบัญชีอาจารย์อย่างน้อยหนึ่งบัญชี หน้า ClassMood ไม่มีปุ่มสมัครสมาชิกสาธารณะ ผู้ดูแลจึงเป็นคนกำหนดว่าใครเข้าใช้งานได้
+สำหรับโปรเจกต์ Supabase ใหม่ ให้ไปที่ `Authentication > Sign In / Providers` แล้วปิด `Allow new users to sign up` ด้วย เพื่อป้องกันการสมัครผ่าน Auth API โดยตรง
+
+ค่าที่ควรใช้ตอน deploy ผ่าน HTTPS:
+
+```dotenv
+CLASSMOOD_REQUIRE_AUTH=true
+CLASSMOOD_SESSION_COOKIE_SECURE=true
+CLASSMOOD_SESSION_SECRET=<ค่าสุ่มคงที่อย่างน้อย 32 ตัวอักษร>
+```
+
+บนเครื่อง local ให้ `CLASSMOOD_SESSION_COOKIE_SECURE=false` และปล่อย `CLASSMOOD_SESSION_SECRET` ว่างได้ ระบบจะสร้างค่าคงที่ไว้ที่ `backend/data/session_secret` ซึ่ง Git ignore ไว้แล้ว
 
 ## วิธีรัน
 
@@ -179,7 +212,7 @@ CLASSMOOD_HOST=127.0.0.1 CLASSMOOD_PORT=5000 python server.py
 
 ## วิธีใช้งานหน้าเว็บ
 
-1. เปิด `http://127.0.0.1:5000`
+1. เปิด `http://127.0.0.1:5000` และเข้าสู่ระบบด้วยบัญชีอาจารย์ใน Supabase
 2. ตั้งชื่อรอบ รายวิชา ห้องเรียน และเวลาเริ่มบันทึก
 3. กด `เริ่มวิเคราะห์`
 4. เลือกแหล่งภาพ
@@ -215,6 +248,7 @@ CLASSMOOD_HOST=127.0.0.1 CLASSMOOD_PORT=5000 python server.py
 - `backend/data/stats.json` เก็บสถิติและ activity log ของรอบวิเคราะห์
 - `backend/data/classmood.db` เก็บห้อง รายวิชา คาบ ID ชั่วคราว เหตุการณ์ และผลรวมรายนาที
 - `backend/data/evidence/` เก็บภาพอ้างอิงและภาพเหตุการณ์ที่ใช้ในรายงาน
+- `backend/data/session_secret` ใช้ลงลายเซ็น session cookie บนเครื่อง local
 
 ไฟล์เหล่านี้เปลี่ยนทุกครั้งที่ทดสอบ จึงไม่ควร commit ขึ้น repo
 SQLite จะถูกสร้างให้อัตโนมัติเมื่อเปิด server ครั้งแรก ไม่ต้องติดตั้ง database server เพิ่ม
@@ -225,6 +259,10 @@ SQLite จะถูกสร้างให้อัตโนมัติเม�
 | Endpoint | Method | ใช้ทำอะไร |
 | --- | --- | --- |
 | `/` | GET | หน้าเว็บหลัก |
+| `/api/config` | GET | ค่า public ที่หน้าเว็บต้องใช้เริ่ม Supabase Auth |
+| `/api/auth/session` | POST | ตรวจ Supabase token และสร้าง HttpOnly session cookie |
+| `/api/auth/me` | GET | ผู้ใช้ที่ล็อกอินอยู่ |
+| `/api/auth/logout` | POST | ล้าง session cookie |
 | `/api/videos` | POST | อัปโหลดไฟล์วิดีโอ |
 | `/api/sources/<session_id>/<source_id>` | POST | ตั้งแหล่งภาพเป็นเว็บแคมหรือคลิป |
 | `/api/sources/<session_id>/<source_id>/status` | GET | เช็กสถานะ source เช่น คลิปจบหรือยัง |

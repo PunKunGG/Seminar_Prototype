@@ -56,6 +56,10 @@ def aggregate_analyses(analyses):
         return None
 
     frame_count = len(analyses)
+    peak_analysis = max(
+        analyses,
+        key=lambda item: float(item.get("total_people") or 0),
+    )
     summary_totals = {key: 0.0 for key in BEHAVIOR_KEYS}
     person_observations = 0.0
 
@@ -102,11 +106,96 @@ def aggregate_analyses(analyses):
 
     return {
         "total_people": total_people,
+        "max_people": max(
+            0,
+            int(round(float(peak_analysis.get("total_people") or 0))),
+        ),
         "behaviors": [],
         "summary": integer_summary,
+        "peak_summary": {
+            key: int(round(float(
+                (peak_analysis.get("summary") or {}).get(key) or 0
+            )))
+            for key in BEHAVIOR_KEYS
+        },
         "attention_rate": attention_rate,
         "annotated_frame": analyses[-1].get("annotated_frame"),
         "sampled_frames": frame_count,
+    }
+
+
+def summarize_report_history(history):
+    """Build a clip-level report without treating the final frame as the clip."""
+    records = list(history or [])
+    empty_summary = {key: 0 for key in BEHAVIOR_KEYS}
+    if not records:
+        return {
+            "avg_attention_rate": 0,
+            "avg_people": 0,
+            "max_people": 0,
+            "total_records": 0,
+            "latest_attention_rate": 0,
+            "latest_total_people": 0,
+            "latest_summary": empty_summary.copy(),
+            "overall_summary": empty_summary.copy(),
+            "report_attention_rate": 0,
+            "report_total_people": 0,
+            "report_summary": empty_summary.copy(),
+            "report_summary_scope": "peak_concurrent_people",
+            "report_summary_time": None,
+            "report_video_position_seconds": None,
+        }
+
+    def total_people_count(item):
+        return max(0, int(round(float(item.get("total_people") or 0))))
+
+    def peak_people_count(item):
+        return max(
+            0,
+            int(round(float(
+                item.get("max_people", item.get("total_people")) or 0
+            ))),
+        )
+
+    latest = records[-1]
+    peak = max(records, key=peak_people_count)
+    overall = aggregate_analyses(records)
+    avg_attention = round(
+        sum(float(item.get("attention_rate") or 0) for item in records)
+        / len(records),
+        1,
+    )
+    avg_people = round(
+        sum(float(item.get("total_people") or 0) for item in records)
+        / len(records),
+        1,
+    )
+    peak_summary = peak.get("peak_summary") or peak.get("summary") or {}
+
+    return {
+        "avg_attention_rate": avg_attention,
+        "avg_people": avg_people,
+        "max_people": peak_people_count(peak),
+        "total_records": len(records),
+        # Keep the latest-frame fields for existing API consumers and debugging.
+        "latest_attention_rate": float(latest.get("attention_rate") or 0),
+        "latest_total_people": total_people_count(latest),
+        "latest_summary": {
+            key: int(round(float((latest.get("summary") or {}).get(key) or 0)))
+            for key in BEHAVIOR_KEYS
+        },
+        "overall_summary": (
+            overall["summary"] if overall else empty_summary.copy()
+        ),
+        "report_attention_rate": avg_attention,
+        "report_total_people": peak_people_count(peak),
+        "report_summary": {
+            key: int(round(float(peak_summary.get(key) or 0)))
+            for key in BEHAVIOR_KEYS
+        },
+        "report_summary_scope": "peak_concurrent_people",
+        "report_summary_time": peak.get("time"),
+        "report_video_position_seconds": peak.get("video_position_seconds"),
     }
 
 
@@ -154,7 +243,9 @@ def build_report_periods(history, period_seconds=600):
                 1,
             ),
             "max_people": max(
-                int(round(float(item.get("total_people") or 0)))
+                int(round(float(
+                    item.get("max_people", item.get("total_people")) or 0
+                )))
                 for item in items
             ),
             "summary": aggregate["summary"],

@@ -20,6 +20,13 @@ function apiUrl(path) {
   return `${API_BASE}${path}`;
 }
 
+function apiFetch(path, options = {}) {
+  return fetch(apiUrl(path), {
+    ...options,
+    credentials: "include",
+  });
+}
+
 function setTextIfPresent(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -44,6 +51,30 @@ function formatVideoTime(seconds) {
 
 function toWholePeople(value) {
   return Math.max(0, Math.round(Number(value) || 0));
+}
+
+function getReportBehavior(summary = {}) {
+  return (
+    summary.report_summary ||
+    summary.overall_summary ||
+    summary.latest_summary ||
+    {}
+  );
+}
+
+function getReportBehaviorTitle(summary = {}) {
+  if (summary.report_summary_scope !== "peak_concurrent_people") {
+    return "ภาพรวมพฤติกรรม";
+  }
+
+  const base = "พฤติกรรมช่วงที่ตรวจพบคนสูงสุด";
+  if (summary.report_video_position_seconds != null) {
+    return `${base} (${formatVideoTime(summary.report_video_position_seconds)})`;
+  }
+  if (summary.report_summary_time) {
+    return `${base} (${summary.report_summary_time})`;
+  }
+  return base;
 }
 
 function formatDecimal(value) {
@@ -339,7 +370,7 @@ async function updateLiveFeed() {
 
   try {
     // ดึงข้อมูลการตรวจจับ
-    const dataRes = await fetch(apiUrl(`/api/data/${currentLab}/${currentCamera}`));
+    const dataRes = await apiFetch(`/api/data/${currentLab}/${currentCamera}`);
     const data = await dataRes.json();
 
     if (!data || data.error) {
@@ -365,7 +396,7 @@ async function updateLiveFeed() {
 
     // ถ้าเปิดโหมดวิเคราะห์พฤติกรรม
     if (useBehaviorMode) {
-      const behaviorRes = await fetch(apiUrl(`/api/behavior/${currentLab}/${currentCamera}`));
+      const behaviorRes = await apiFetch(`/api/behavior/${currentLab}/${currentCamera}`);
       const behaviorData = await behaviorRes.json();
 
       if (behaviorData && !behaviorData.error) {
@@ -620,7 +651,7 @@ function backToMenu() {
   const sessionId = currentLab;
   const cameraId = currentCamera;
   if (sessionId && isStreamActive(sessionId, cameraId)) {
-    fetch(apiUrl(`/api/sources/${sessionId}/${cameraId}`), {
+    apiFetch(`/api/sources/${sessionId}/${cameraId}`, {
       method: "DELETE",
     }).catch(() => {
       /* the server may already be stopped */
@@ -671,9 +702,7 @@ function downloadReport(format) {
   let data;
   if (latestExportData) {
     const s = latestExportData.summary || {};
-    const latest = s.latest_summary || {};
-    const hasPeriods = (latestExportData.periods || []).length > 0;
-    const reportBehavior = hasPeriods ? s.overall_summary || latest : latest;
+    const reportBehavior = getReportBehavior(s);
     data = {
       lab_id: latestExportData.lab_id,
       session_name: currentSessionName || latestExportData.lab_id,
@@ -681,16 +710,14 @@ function downloadReport(format) {
       avg_attention_rate: s.avg_attention_rate,
       avg_people: s.avg_people,
       max_people: s.max_people,
+      report_total_people: s.report_total_people ?? s.max_people,
       total_records: s.total_records,
       latest_attention_rate: s.latest_attention_rate,
-      report_attention_label: hasPeriods
-        ? "อัตราความตั้งใจเฉลี่ย (%)"
-        : "อัตราความตั้งใจล่าสุด (%)",
-      report_attention_rate: hasPeriods
-        ? s.avg_attention_rate
-        : s.latest_attention_rate,
+      report_attention_label: "อัตราความตั้งใจเฉลี่ย (%)",
+      report_attention_rate:
+        s.report_attention_rate ?? s.avg_attention_rate,
       latest_total_people: s.latest_total_people,
-      behavior_scope: hasPeriods ? "ภาพรวมพฤติกรรม" : "พฤติกรรมล่าสุด",
+      behavior_scope: getReportBehaviorTitle(s),
       behavior_attentive: reportBehavior.attentive || 0,
       behavior_sleeping: reportBehavior.sleeping || 0,
       behavior_looking_down: reportBehavior.looking_down || 0,
@@ -706,9 +733,10 @@ function downloadReport(format) {
       avg_attention_rate: 0,
       avg_people: 0,
       max_people: 0,
+      report_total_people: 0,
       total_records: 0,
       latest_attention_rate: 0,
-      report_attention_label: "อัตราความตั้งใจล่าสุด (%)",
+      report_attention_label: "อัตราความตั้งใจเฉลี่ย (%)",
       report_attention_rate: 0,
       latest_total_people: 0,
       behavior_attentive: 0,
@@ -717,7 +745,7 @@ function downloadReport(format) {
       behavior_hand_raised: 0,
       behavior_standing: 0,
       behavior_unknown: 0,
-      behavior_scope: "พฤติกรรมล่าสุด",
+      behavior_scope: "พฤติกรรมช่วงที่ตรวจพบคนสูงสุด",
     };
   }
 
@@ -844,7 +872,7 @@ function buildCSV(data) {
     ["สถิติรวม"],
     ["จำนวนนักศึกษาเฉลี่ย (คน)", data.avg_people],
     ["ความตั้งใจเรียนเฉลี่ย (%)", data.avg_attention_rate],
-    ["นักเรียนสูงสุด (คน)", data.max_people],
+    ["จำนวนคนสูงสุดพร้อมกัน (คน)", data.report_total_people ?? data.max_people],
     ["จำนวนบันทึกทั้งหมด", data.total_records],
     [],
     [data.behavior_scope || "พฤติกรรมล่าสุด"],
@@ -929,7 +957,7 @@ function buildExcel(data) {
     [],
     ["จำนวนนักศึกษาเฉลี่ย (คน)", data.avg_people],
     ["ความตั้งใจเรียนเฉลี่ย (%)", data.avg_attention_rate],
-    ["นักเรียนสูงสุด (คน)", data.max_people],
+    ["จำนวนคนสูงสุดพร้อมกัน (คน)", data.report_total_people ?? data.max_people],
     ["จำนวนบันทึก", data.total_records],
     [],
     [data.behavior_scope || "พฤติกรรมล่าสุด"],
@@ -1057,7 +1085,7 @@ async function exportReport() {
 
   // ดึงข้อมูลจาก backend
   try {
-    const res = await fetch(apiUrl(`/api/export/${currentLab}`));
+    const res = await apiFetch(`/api/export/${currentLab}`);
     const data = await res.json();
     latestExportData = {
       ...data,
@@ -1065,14 +1093,10 @@ async function exportReport() {
     };
 
     const s = latestExportData.summary || {};
-    const latest = s.latest_summary || {};
     const periods = latestExportData.periods || [];
     const tracking = latestExportData.tracking || null;
     const session = tracking?.session || {};
-    const isTimelineReport = periods.length > 0;
-    const reportBehavior = isTimelineReport
-      ? s.overall_summary || latest
-      : latest;
+    const reportBehavior = getReportBehavior(s);
 
     const set = (id, text) => {
       const el = document.getElementById(id);
@@ -1089,14 +1113,17 @@ async function exportReport() {
       "reportAvgAttention",
       `ความตั้งใจเฉลี่ย: ${s.avg_attention_rate ?? 0}%`,
     );
-    set("reportMaxPeople", `นักเรียนสูงสุด: ${toWholePeople(s.max_people)} คน`);
+    set(
+      "reportMaxPeople",
+      `จำนวนคนสูงสุดพร้อมกัน: ${toWholePeople(s.report_total_people ?? s.max_people)} คน`,
+    );
     set(
       "reportBehaviorTitle",
-      isTimelineReport ? "ภาพรวมพฤติกรรม" : "พฤติกรรมล่าสุด",
+      getReportBehaviorTitle(s),
     );
     set(
       "reportAttentionLabel",
-      isTimelineReport ? "อัตราความตั้งใจเฉลี่ย" : "อัตราความตั้งใจล่าสุด",
+      "อัตราความตั้งใจเฉลี่ย",
     );
     set("reportAttentive", `${toWholePeople(reportBehavior.attentive)} คน`);
     set("reportSleeping", `${toWholePeople(reportBehavior.sleeping)} คน`);
@@ -1106,7 +1133,7 @@ async function exportReport() {
     set("reportUnknown", `${toWholePeople(reportBehavior.unknown)} คน`);
     set(
       "reportLatestAttention",
-      `${isTimelineReport ? s.avg_attention_rate ?? 0 : s.latest_attention_rate ?? 0}%`,
+      `${s.report_attention_rate ?? s.avg_attention_rate ?? 0}%`,
     );
     renderReportTimeline(periods, latestExportData.period_seconds);
     renderTrackingReport(tracking);
@@ -1267,7 +1294,7 @@ async function updateCharts() {
   if (!currentLab) return;
 
   try {
-    const res = await fetch(apiUrl(`/api/stats/${currentLab}`));
+    const res = await apiFetch(`/api/stats/${currentLab}`);
     const data = await res.json();
 
     if (attentionChart && data.labels) {
@@ -1302,7 +1329,7 @@ async function updateActivityLog() {
   if (!currentLab) return;
 
   try {
-    const res = await fetch(apiUrl(`/api/activities/${currentLab}`));
+    const res = await apiFetch(`/api/activities/${currentLab}`);
     const data = await res.json();
 
     const activityList = document.getElementById("activityList");
@@ -1413,7 +1440,7 @@ async function checkSourceStatus() {
   if (!currentLab || currentSourceType !== "video") return;
 
   try {
-    const res = await fetch(apiUrl(`/api/sources/${currentLab}/${currentCamera}/status`));
+    const res = await apiFetch(`/api/sources/${currentLab}/${currentCamera}/status`);
     if (!res.ok) return;
     const data = await res.json();
 
@@ -1468,7 +1495,7 @@ async function handleVideoEnded(data) {
 
 async function pollAlerts() {
   try {
-    const res = await fetch(apiUrl(`/api/alerts?since_id=${lastAlertId}`));
+    const res = await apiFetch(`/api/alerts?since_id=${lastAlertId}`);
     if (!res.ok) return;
     const data = await res.json();
     for (const alert of data.alerts || []) {
@@ -1537,7 +1564,7 @@ async function setVideoSource(labId, camId, source, displayLabel = null) {
     return;
   }
   try {
-    const res = await fetch(apiUrl(`/api/sources/${labId}/${camId}`), {
+    const res = await apiFetch(`/api/sources/${labId}/${camId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1641,7 +1668,7 @@ async function uploadAndUseVideo(file) {
     const formData = new FormData();
     formData.append("video", file);
 
-    const res = await fetch(apiUrl("/api/videos"), {
+    const res = await apiFetch("/api/videos", {
       method: "POST",
       body: formData,
     });

@@ -35,6 +35,8 @@ backend/video_sources/
 backend/data/stats.json
 backend/data/classmood.db*
 backend/data/evidence/
+backend/data/session_secret
+backend/data/*.pid
 
 # Environment variables
 .env

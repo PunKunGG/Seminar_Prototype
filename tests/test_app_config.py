@@ -9,7 +9,13 @@ BACKEND_DIR = os.path.join(PROJECT_ROOT, "backend")
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from app_config import env_flag, env_float, env_int, load_config
+from app_config import (
+    env_flag,
+    env_float,
+    env_int,
+    load_config,
+    load_env_file,
+)
 
 
 class EnvironmentParserTests(unittest.TestCase):
@@ -26,6 +32,37 @@ class EnvironmentParserTests(unittest.TestCase):
         self.assertEqual(env_int("INTEGER", 7, environment), 7)
         self.assertEqual(env_float("FLOAT", 0, environment), 1.25)
         self.assertEqual(env_int("MISSING", 9, environment), 9)
+
+    def test_env_file_loads_values_without_overriding_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = os.path.join(temp_dir, ".env")
+            with open(env_path, "w", encoding="utf-8") as env_file:
+                env_file.write(
+                    "# local settings\n"
+                    "SUPABASE_URL=https://example.supabase.co\n"
+                    "export SUPABASE_PUBLISHABLE_KEY='sb_publishable_file'\n"
+                )
+
+            environment = {"SUPABASE_URL": "https://override.supabase.co"}
+            load_env_file(env_path, environment)
+
+            self.assertEqual(
+                environment["SUPABASE_URL"],
+                "https://override.supabase.co",
+            )
+            self.assertEqual(
+                environment["SUPABASE_PUBLISHABLE_KEY"],
+                "sb_publishable_file",
+            )
+
+    def test_env_file_rejects_malformed_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = os.path.join(temp_dir, ".env")
+            with open(env_path, "w", encoding="utf-8") as env_file:
+                env_file.write("NOT VALID\n")
+
+            with self.assertRaises(ValueError):
+                load_env_file(env_path, {})
 
 
 class AppConfigTests(unittest.TestCase):
@@ -70,6 +107,39 @@ class AppConfigTests(unittest.TestCase):
                 config.video_upload_dir,
                 os.path.abspath(first_source),
             )
+            self.assertFalse(config.supabase_auth_enabled)
+            self.assertFalse(config.session_cookie_secure)
+
+    def test_supabase_auth_requires_a_complete_valid_pair(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(ValueError):
+                load_config(temp_dir, {
+                    "SUPABASE_URL": "https://example.supabase.co",
+                })
+            with self.assertRaises(ValueError):
+                load_config(temp_dir, {
+                    "SUPABASE_URL": "http://example.supabase.co",
+                    "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+                })
+            with self.assertRaises(ValueError):
+                load_config(temp_dir, {
+                    "CLASSMOOD_REQUIRE_AUTH": "true",
+                })
+
+    def test_supabase_auth_settings_are_normalized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = load_config(temp_dir, {
+                "SUPABASE_URL": "https://example.supabase.co/",
+                "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+                "CLASSMOOD_SESSION_COOKIE_SECURE": "true",
+            })
+
+            self.assertTrue(config.supabase_auth_enabled)
+            self.assertEqual(
+                config.supabase_url,
+                "https://example.supabase.co",
+            )
+            self.assertTrue(config.session_cookie_secure)
 
 
 if __name__ == "__main__":

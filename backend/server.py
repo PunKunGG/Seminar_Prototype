@@ -1,5 +1,5 @@
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 import ipaddress
 import json
 import math
@@ -10,12 +10,17 @@ import time
 from urllib.parse import quote
 
 import cv2
-from flask import Flask, jsonify, send_from_directory, Response, request
+from flask import Flask, jsonify, send_from_directory, Response, request, session
 from flask_cors import CORS
 from ultralytics import YOLO
 from werkzeug.utils import secure_filename
 
 from app_config import CONFIG, first_existing_path
+from auth_service import (
+    AuthVerificationError,
+    SupabaseAuthService,
+    load_or_create_session_secret,
+)
 from behavior_analyzer import (
     analyze_frame,
     get_behavior_label_en,
@@ -30,6 +35,7 @@ from video_sampling import (
     format_video_time,
     iter_sample_windows,
     iter_sequential_decode_steps,
+    summarize_report_history,
 )
 from video_source_policy import VideoSourcePolicy
 
@@ -41,7 +47,109 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 app = Flask(__name__, static_folder=CONFIG.dashboard_dir)
-CORS(app, resources={r"/api/*": {"origins": CONFIG.allowed_origins}})
+if CONFIG.supabase_auth_enabled:
+    app.config.update(
+        SECRET_KEY=load_or_create_session_secret(
+            CONFIG.session_secret,
+            CONFIG.session_secret_file,
+        ),
+        SESSION_COOKIE_NAME="classmood_session",
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=CONFIG.session_cookie_secure,
+        PERMANENT_SESSION_LIFETIME=timedelta(minutes=55),
+        SESSION_REFRESH_EACH_REQUEST=False,
+    )
+
+CORS(
+    app,
+    resources={r"/api/*": {"origins": CONFIG.allowed_origins}},
+    supports_credentials=True,
+)
+supabase_auth = (
+    SupabaseAuthService(
+        CONFIG.supabase_url,
+        CONFIG.supabase_publishable_key,
+    )
+    if CONFIG.supabase_auth_enabled
+    else None
+)
+
+PUBLIC_API_PATHS = frozenset({
+    "/api/config",
+    "/api/auth/session",
+    "/api/auth/logout",
+})
+
+
+def _no_store(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.before_request
+def require_authenticated_api_session():
+    if (
+        not CONFIG.supabase_auth_enabled
+        or request.method == "OPTIONS"
+        or not request.path.startswith("/api/")
+        or request.path in PUBLIC_API_PATHS
+    ):
+        return None
+    if isinstance(session.get("auth_user"), dict):
+        return None
+    return _no_store(jsonify({"error": "Authentication required"})), 401
+
+
+@app.get("/api/config")
+def public_config():
+    return _no_store(jsonify({
+        "auth": {
+            "enabled": CONFIG.supabase_auth_enabled,
+            "supabase_url": CONFIG.supabase_url,
+            "publishable_key": CONFIG.supabase_publishable_key,
+        },
+    }))
+
+
+@app.post("/api/auth/session")
+def create_auth_session():
+    if not CONFIG.supabase_auth_enabled or supabase_auth is None:
+        return _no_store(jsonify({
+            "ok": True,
+            "auth_enabled": False,
+        }))
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, separator, access_token = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer":
+        return _no_store(jsonify({"error": "Invalid access token"})), 401
+
+    try:
+        auth_user = supabase_auth.verify_access_token(access_token)
+    except AuthVerificationError:
+        return _no_store(jsonify({"error": "Invalid access token"})), 401
+
+    session.clear()
+    session.permanent = True
+    session["auth_user"] = auth_user
+    return _no_store(jsonify({"ok": True, "user": auth_user}))
+
+
+@app.get("/api/auth/me")
+def current_auth_user():
+    return _no_store(jsonify({
+        "ok": True,
+        "user": session.get("auth_user"),
+    }))
+
+
+@app.post("/api/auth/logout")
+def clear_auth_session():
+    if CONFIG.supabase_auth_enabled:
+        session.clear()
+    return _no_store(jsonify({"ok": True}))
 
 # โหลดโมเดล YOLO สำหรับตรวจจับคน — ลอง yolov8s ก่อน fallback ไป nano
 _detection_model_path = first_existing_path(
@@ -1272,7 +1380,15 @@ def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None)
             "time": time_str,
             "attention_rate": analysis["attention_rate"],
             "total_people": analysis["total_people"],
+            "max_people": analysis.get(
+                "max_people",
+                analysis["total_people"],
+            ),
             "summary": analysis["summary"],
+            "peak_summary": analysis.get(
+                "peak_summary",
+                analysis["summary"],
+            ),
         }
         if video_position_seconds is not None:
             history_item.update({
@@ -1309,11 +1425,7 @@ def export_lab_data(lab_id):
         history = list(stats_history.get(lab_id, []))
         activities = list(activity_log.get(lab_id, []))
 
-    avg_attention = round(sum(h["attention_rate"] for h in history) / len(history), 1) if history else 0
-    avg_people = round(sum(h["total_people"] for h in history) / len(history), 1) if history else 0
-    max_people = max((h["total_people"] for h in history), default=0)
-    latest = history[-1] if history else None
-    overall = aggregate_analyses(history)
+    report_summary = summarize_report_history(history)
     periods = build_report_periods(history)
     for cam_id, _tracker in _session_tracker_items(lab_id):
         _persist_tracking(lab_id, cam_id, force=True)
@@ -1329,22 +1441,7 @@ def export_lab_data(lab_id):
         "lab_id": lab_id,
         "session_name": _session_label(lab_id),
         "export_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "summary": {
-            "avg_attention_rate": avg_attention,
-            "avg_people": avg_people,
-            "max_people": max_people,
-            "total_records": len(history),
-            "latest_attention_rate": latest["attention_rate"] if latest else 0,
-            "latest_total_people": latest["total_people"] if latest else 0,
-            "latest_summary": latest["summary"] if latest else {
-                "attentive": 0, "sleeping": 0, "looking_down": 0,
-                "hand_raised": 0, "standing": 0, "unknown": 0
-            },
-            "overall_summary": overall["summary"] if overall else {
-                "attentive": 0, "sleeping": 0, "looking_down": 0,
-                "hand_raised": 0, "standing": 0, "unknown": 0
-            },
-        },
+        "summary": report_summary,
         "period_seconds": 600 if periods else None,
         "periods": periods,
         "tracking": tracking_report,

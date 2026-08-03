@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
+from urllib.parse import urlsplit
 
 
 DEFAULT_ALLOWED_ORIGINS = (
@@ -14,6 +16,40 @@ DEFAULT_VIDEO_EXTENSIONS = frozenset({
     ".mkv",
     ".webm",
 })
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def load_env_file(path, environ=None):
+    """Load the small KEY=VALUE subset used by this project without overrides."""
+    environment = os.environ if environ is None else environ
+    if not os.path.isfile(path):
+        return environment
+
+    with open(path, "r", encoding="utf-8") as env_file:
+        for line_number, raw_line in enumerate(env_file, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+
+            name, separator, value = line.partition("=")
+            name = name.strip()
+            if not separator or not ENV_NAME_PATTERN.fullmatch(name):
+                raise ValueError(
+                    f"Invalid environment entry at {path}:{line_number}",
+                )
+
+            value = value.strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
+            environment.setdefault(name, value)
+
+    return environment
 
 
 def env_flag(name, default=False, environ=None):
@@ -57,6 +93,46 @@ def _absolute_path(value):
     return os.path.abspath(os.path.expanduser(value))
 
 
+def _supabase_settings(environment):
+    url = environment.get("SUPABASE_URL", "").strip().rstrip("/")
+    publishable_key = environment.get(
+        "SUPABASE_PUBLISHABLE_KEY",
+        "",
+    ).strip()
+
+    if bool(url) != bool(publishable_key):
+        raise ValueError(
+            "SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY must be set together",
+        )
+    if not url:
+        if env_flag("CLASSMOOD_REQUIRE_AUTH", False, environment):
+            raise ValueError(
+                "Supabase Auth is required but its project settings are missing",
+            )
+        return "", "", False
+
+    parsed_url = urlsplit(url)
+    if (
+        parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username
+        or parsed_url.password
+        or parsed_url.query
+        or parsed_url.fragment
+        or parsed_url.path not in {"", "/"}
+    ):
+        raise ValueError("SUPABASE_URL must be a project HTTPS origin")
+    if not (
+        publishable_key.startswith("sb_publishable_")
+        or publishable_key.startswith("eyJ")
+    ):
+        raise ValueError(
+            "SUPABASE_PUBLISHABLE_KEY must be a publishable or legacy anon key",
+        )
+
+    return url, publishable_key, True
+
+
 @dataclass(frozen=True)
 class AppConfig:
     base_dir: str
@@ -89,18 +165,32 @@ class AppConfig:
     tracking_db_write_interval: float
     realtime_stats_interval: float
     track_max_missing_seconds: float
+    supabase_url: str
+    supabase_publishable_key: str
+    supabase_auth_enabled: bool
+    session_secret: str
+    session_secret_file: str
+    session_cookie_secure: bool
     host: str
     port: int
     debug: bool
 
 
 def load_config(base_dir=None, environ=None):
-    environment = os.environ if environ is None else environ
     resolved_base = _absolute_path(
         base_dir or os.path.dirname(os.path.abspath(__file__)),
     )
     project_root = _absolute_path(os.path.join(resolved_base, os.pardir))
     data_dir = os.path.join(resolved_base, "data")
+    if environ is None:
+        environment = dict(os.environ)
+        load_env_file(os.path.join(project_root, ".env"), environment)
+    else:
+        environment = environ
+
+    supabase_url, supabase_publishable_key, auth_enabled = (
+        _supabase_settings(environment)
+    )
 
     allowed_origins = tuple(
         origin.strip()
@@ -271,6 +361,22 @@ def load_config(base_dir=None, environ=None):
                 4.0,
                 environment,
             ),
+        ),
+        supabase_url=supabase_url,
+        supabase_publishable_key=supabase_publishable_key,
+        supabase_auth_enabled=auth_enabled,
+        session_secret=environment.get(
+            "CLASSMOOD_SESSION_SECRET",
+            "",
+        ).strip(),
+        session_secret_file=_absolute_path(environment.get(
+            "CLASSMOOD_SESSION_SECRET_FILE",
+            os.path.join(data_dir, "session_secret"),
+        )),
+        session_cookie_secure=env_flag(
+            "CLASSMOOD_SESSION_COOKIE_SECURE",
+            False,
+            environment,
         ),
         host=environment.get("CLASSMOOD_HOST", "127.0.0.1"),
         port=env_int("CLASSMOOD_PORT", 5000, environment),

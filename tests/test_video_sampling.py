@@ -14,6 +14,7 @@ from video_sampling import (
     format_video_time,
     iter_sample_windows,
     iter_sequential_decode_steps,
+    summarize_report_history,
 )
 
 
@@ -42,8 +43,10 @@ class VideoSamplingTests(unittest.TestCase):
         ])
 
         self.assertEqual(result["total_people"], 3)
+        self.assertEqual(result["max_people"], 4)
         self.assertEqual(result["summary"]["attentive"], 1)
         self.assertEqual(result["summary"]["sleeping"], 2)
+        self.assertEqual(result["peak_summary"]["sleeping"], 3)
         self.assertEqual(sum(result["summary"].values()), result["total_people"])
         self.assertEqual(result["attention_rate"], 50.0)
         self.assertEqual(result["annotated_frame"], "last")
@@ -97,6 +100,7 @@ class VideoSamplingTests(unittest.TestCase):
                 "summary": {"attentive": 8 if minute < 10 else 4,
                             "looking_down": 0 if minute < 10 else 4},
             })
+        history[0]["max_people"] = 11
 
         periods = build_report_periods(history)
 
@@ -104,6 +108,7 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(periods[0]["label"], "00:00:00 - 00:10:00")
         self.assertEqual(periods[0]["records"], 10)
         self.assertEqual(periods[0]["avg_attention_rate"], 80.0)
+        self.assertEqual(periods[0]["max_people"], 11)
         self.assertEqual(periods[1]["avg_attention_rate"], 40.0)
         self.assertEqual(periods[2]["records"], 1)
 
@@ -116,6 +121,52 @@ class VideoSamplingTests(unittest.TestCase):
         }])
 
         self.assertEqual(periods, [])
+
+    def test_report_summary_uses_peak_people_instead_of_last_frame(self):
+        history = [
+            {
+                "time": "09:00:05",
+                "attention_rate": 72,
+                "total_people": 7,
+                "max_people": 11,
+                "summary": {"attentive": 5, "standing": 1, "unknown": 1},
+                "peak_summary": {
+                    "attentive": 8,
+                    "standing": 2,
+                    "unknown": 1,
+                },
+            },
+            {
+                "time": "09:00:10",
+                "attention_rate": 50,
+                "total_people": 8,
+                "summary": {"attentive": 4, "looking_down": 4},
+            },
+            {
+                "time": "09:00:15",
+                "attention_rate": 67,
+                "total_people": 3,
+                "summary": {"attentive": 2, "standing": 1},
+            },
+        ]
+
+        result = summarize_report_history(history)
+
+        self.assertEqual(result["report_total_people"], 11)
+        self.assertEqual(result["max_people"], 11)
+        self.assertEqual(result["report_summary"]["attentive"], 8)
+        self.assertEqual(sum(result["report_summary"].values()), 11)
+        self.assertEqual(result["report_summary_time"], "09:00:05")
+        self.assertEqual(result["latest_total_people"], 3)
+        self.assertEqual(result["latest_summary"]["attentive"], 2)
+        self.assertEqual(result["report_attention_rate"], 63.0)
+
+    def test_report_summary_handles_empty_history(self):
+        result = summarize_report_history([])
+
+        self.assertEqual(result["report_total_people"], 0)
+        self.assertEqual(sum(result["report_summary"].values()), 0)
+        self.assertIsNone(result["report_summary_time"])
 
     def test_formats_video_timeline(self):
         self.assertEqual(format_video_time(0), "00:00:00")

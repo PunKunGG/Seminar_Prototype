@@ -1,3 +1,6 @@
+const PDF_RENDER_SCALE = 1.35;
+const PDF_JPEG_QUALITY = 0.7;
+
 function waitForReportImages(root, timeoutMs = 5000) {
   const images = Array.from(root.querySelectorAll("img"));
   if (!images.length) return Promise.resolve();
@@ -73,6 +76,9 @@ function generatePDF(labId) {
   const closeButton = document.getElementById("reportCloseButton");
   const timelineWrapper = document.getElementById("reportTimelineTableWrapper");
   const trackingWrapper = document.getElementById("reportTrackingTableWrapper");
+  const behaviorEventsWrapper = document.getElementById(
+    "reportBehaviorEventsTableWrapper",
+  );
   const savedStyles = {
     maxHeight: reportContent.style.maxHeight,
     overflow: reportContent.style.overflow,
@@ -82,6 +88,7 @@ function generatePDF(labId) {
     closeDisplay: closeButton?.style.display || "",
     timelineOverflow: timelineWrapper?.style.overflow || "",
     trackingOverflow: trackingWrapper?.style.overflow || "",
+    behaviorEventsOverflow: behaviorEventsWrapper?.style.overflow || "",
   };
   const restoreReportLayout = () => {
     reportContent.style.maxHeight = savedStyles.maxHeight;
@@ -92,6 +99,9 @@ function generatePDF(labId) {
     if (closeButton) closeButton.style.display = savedStyles.closeDisplay;
     if (timelineWrapper) timelineWrapper.style.overflow = savedStyles.timelineOverflow;
     if (trackingWrapper) trackingWrapper.style.overflow = savedStyles.trackingOverflow;
+    if (behaviorEventsWrapper) {
+      behaviorEventsWrapper.style.overflow = savedStyles.behaviorEventsOverflow;
+    }
   };
 
   reportContent.style.maxHeight = "none";
@@ -102,12 +112,17 @@ function generatePDF(labId) {
   if (closeButton) closeButton.style.display = "none";
   if (timelineWrapper) timelineWrapper.style.overflow = "visible";
   if (trackingWrapper) trackingWrapper.style.overflow = "visible";
+  if (behaviorEventsWrapper) behaviorEventsWrapper.style.overflow = "visible";
 
   waitForReportImages(reportContent)
     .then(() => {
       const contentHeight = reportContent.getBoundingClientRect().height;
       const keepTogetherRanges = collectPdfKeepTogetherRanges(reportContent);
-      return html2canvas(reportContent, { scale: 2, useCORS: true })
+      return html2canvas(reportContent, {
+        scale: PDF_RENDER_SCALE,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+      })
         .then((canvas) => ({
           canvas,
           contentHeight,
@@ -170,12 +185,14 @@ function generatePDF(labId) {
 
         if (pageIndex > 0) pdf.addPage();
         pdf.addImage(
-          sliceCanvas.toDataURL("image/png"),
-          "PNG",
+          sliceCanvas.toDataURL("image/jpeg", PDF_JPEG_QUALITY),
+          "JPEG",
           margin,
           margin,
           imageWidth,
           sliceHeight,
+          undefined,
+          "FAST",
         );
         sourceY = sliceEnd;
         pageIndex += 1;

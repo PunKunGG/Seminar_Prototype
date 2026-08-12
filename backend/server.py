@@ -12,10 +12,9 @@ from urllib.parse import quote
 import cv2
 from flask import Flask, jsonify, send_from_directory, Response, request, session
 from flask_cors import CORS
-from ultralytics import YOLO
 from werkzeug.utils import secure_filename
 
-from app_config import CONFIG, first_existing_path
+from app_config import CONFIG
 from auth_service import (
     AuthVerificationError,
     SupabaseAuthService,
@@ -23,6 +22,7 @@ from auth_service import (
 )
 from behavior_analyzer import (
     analyze_frame,
+    detect_context_objects,
     get_behavior_label_en,
     get_behavior_label_th,
 )
@@ -151,17 +151,6 @@ def clear_auth_session():
         session.clear()
     return _no_store(jsonify({"ok": True}))
 
-# โหลดโมเดล YOLO สำหรับตรวจจับคน — ลอง yolov8s ก่อน fallback ไป nano
-_detection_model_path = first_existing_path(
-    os.path.join(CONFIG.base_dir, "yolov8s.pt"),
-    os.path.join(CONFIG.project_root, "yolov8s.pt"),
-    os.path.join(CONFIG.base_dir, "yolov8n.pt"),
-    os.path.join(CONFIG.project_root, "yolov8n.pt"),
-)
-model = YOLO(_detection_model_path or "yolov8n.pt")
-model.classes = [0]  # เฉพาะ class คน
-detection_lock = threading.Lock()
-
 # 📊 เก็บสถิติย้อนหลัง
 stats_history = {}  # {lab_id: deque of stats}
 activity_log = {}   # {lab_id: deque of activities}
@@ -260,12 +249,12 @@ def _get_image_path(lab_id, cam_id):
 
 
 def _get_cached(lab_id, cam_id):
+    key = (lab_id, cam_id)
     with state_lock:
-        entry = analysis_cache.get((lab_id, cam_id))
-        source_state = source_states.get((lab_id, cam_id), {})
-        is_sampled_video = source_state.get("processing_mode") == "sampled"
+        entry = analysis_cache.get(key)
+        source_is_attached = key in frame_buffers
         if entry and (
-            is_sampled_video
+            source_is_attached
             or (time.time() - entry["ts"]) < CONFIG.cache_ttl
         ):
             return entry["result"]
@@ -362,12 +351,73 @@ def _store_buffer_frame(
 ):
     with buf["lock"]:
         buf["frame"] = frame
-        buf["annotated_frame"] = annotated_frame
+        if annotated_frame is not None:
+            buf["annotated_frame"] = annotated_frame
         if position_seconds is not None:
             buf["position_seconds"] = max(0.0, float(position_seconds))
         buf["frame_token"] += 1
-        buf["count_frame"] = None
-        buf["count_token"] = -1
+
+
+def _empty_analysis():
+    return {
+        "total_people": 0,
+        "behaviors": [],
+        "summary": {key: 0 for key in BEHAVIOR_KEYS},
+        "attention_rate": 0,
+        "annotated_frame": None,
+        "track_summaries": [],
+    }
+
+
+def _context_objects_for_frame(buf, frame, marker=None, *, include_refresh=False):
+    if not CONFIG.context_detection_enabled or frame is None:
+        return ([], False) if include_refresh else []
+
+    current_marker = (
+        time.monotonic() if marker is None else max(0.0, float(marker))
+    )
+    if buf is not None:
+        with buf["lock"]:
+            previous_marker = buf.get("context_marker")
+            cached_objects = list(buf.get("context_objects") or [])
+        if (
+            previous_marker is not None
+            and current_marker >= previous_marker
+            and current_marker - previous_marker
+            < CONFIG.context_detection_interval
+        ):
+            return (cached_objects, False) if include_refresh else cached_objects
+
+    objects = detect_context_objects(
+        frame,
+        confidence=CONFIG.context_detection_confidence,
+        image_size=CONFIG.context_detection_image_size,
+    )
+    if buf is not None:
+        with buf["lock"]:
+            buf["context_objects"] = list(objects)
+            buf["context_marker"] = current_marker
+    return (objects, True) if include_refresh else objects
+
+
+def _analyze_frame_with_context(buf, frame, marker=None):
+    context_objects, refreshed = _context_objects_for_frame(
+        buf,
+        frame,
+        marker,
+        include_refresh=True,
+    )
+    analysis = analyze_frame(
+        frame,
+        context_objects=context_objects,
+        refine_phone_detection=refreshed,
+        phone_detection_confidence=CONFIG.context_detection_confidence,
+    )
+    refined_objects = analysis.pop("_context_objects", None)
+    if refreshed and refined_objects is not None and buf is not None:
+        with buf["lock"]:
+            buf["context_objects"] = list(refined_objects)
+    return analysis
 
 
 def _new_session_tracker(metadata):
@@ -381,6 +431,10 @@ def _new_session_tracker(metadata):
             max_missing_seconds=sample_interval + 15,
             observation_step_seconds=1.0 / sample_fps,
             max_observation_gap_seconds=(1.0 / sample_fps) * 1.75,
+            require_contiguous_transitions=True,
+            position_matching=CONFIG.track_position_enabled,
+            position_memory_seconds=CONFIG.track_position_memory_seconds,
+            max_position_distance=CONFIG.track_position_max_distance,
         )
     return SessionTracker(
         max_missing_seconds=max(
@@ -392,6 +446,9 @@ def _new_session_tracker(metadata):
             1.0,
             3.0 / CONFIG.annotated_stream_fps,
         ),
+        position_matching=CONFIG.track_position_enabled,
+        position_memory_seconds=CONFIG.track_position_memory_seconds,
+        max_position_distance=CONFIG.track_position_max_distance,
     )
 
 
@@ -448,6 +505,48 @@ def _draw_track_labels(frame, detections):
     return frame
 
 
+def _draw_count_frame(frame, detections):
+    if frame is None:
+        return frame
+    result = frame.copy()
+    for detection in detections:
+        bbox = detection.get("bbox")
+        if not bbox:
+            continue
+        x1, y1, x2, y2 = map(int, bbox)
+        cv2.rectangle(result, (x1, y1), (x2, y2), (37, 99, 235), 2)
+        track_id = detection.get("track_id")
+        label = f"ID {track_id}" if track_id is not None else "Person"
+        cv2.putText(
+            result,
+            label,
+            (x1, max(18, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (37, 99, 235),
+            2,
+        )
+
+    height, width = result.shape[:2]
+    cv2.rectangle(
+        result,
+        (0, height - 32),
+        (width, height),
+        (30, 30, 30),
+        cv2.FILLED,
+    )
+    cv2.putText(
+        result,
+        f"People detected: {len(detections)}",
+        (8, height - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (220, 220, 220),
+        1,
+    )
+    return result
+
+
 def _persist_tracking(lab_id, cam_id, force=False, full=False):
     key = (lab_id, cam_id)
     tracker = _get_session_tracker(lab_id, cam_id)
@@ -481,8 +580,12 @@ def _evidence_url(session_id, filename):
 
 
 def _with_evidence_urls(session_id, report):
-    for item in report.get("evidence", []):
-        item["url"] = _evidence_url(session_id, item.get("filename", ""))
+    for collection_name in ("evidence", "representative_evidence"):
+        for item in report.get(collection_name, []):
+            item["url"] = _evidence_url(
+                session_id,
+                item.get("filename", ""),
+            )
     return report
 
 
@@ -702,7 +805,7 @@ def _capture_sampled_video(key, buf, cap, metadata):
             analysis = _apply_tracking(
                 lab_id,
                 cam_id,
-                analyze_frame(frame),
+                _analyze_frame_with_context(buf, frame, sample_time),
                 sample_time,
                 frame,
             )
@@ -846,6 +949,13 @@ def _capture_loop(key, metadata):
             )
         time.sleep(0.033)  # ~30 FPS max
     cap.release()
+    analysis_thread = buf.get("analysis_thread")
+    if (
+        analysis_thread
+        and analysis_thread is not threading.current_thread()
+        and analysis_thread.is_alive()
+    ):
+        analysis_thread.join(timeout=10.0)
     if is_file and buf.get("ended"):
         _finalize_tracking(
             key[0],
@@ -862,6 +972,66 @@ def _capture_loop(key, metadata):
     print(f"🛑 ปิด {'วิดีโอ' if is_file else 'เว็บแคม'} {key}")
 
 
+def _realtime_analysis_loop(key):
+    lab_id, cam_id = key
+    buf = frame_buffers.get(key)
+    if not buf:
+        return
+
+    interval = 1.0 / max(1, CONFIG.annotated_stream_fps)
+    last_token = -1
+    while _capture_is_current(key, buf):
+        started = time.monotonic()
+        with buf["lock"]:
+            frame_token = buf["frame_token"]
+            frame = buf["frame"].copy() if buf["frame"] is not None else None
+            position_seconds = float(buf.get("position_seconds") or 0)
+
+        if frame is None or frame_token == last_token:
+            time.sleep(min(0.05, interval))
+            continue
+
+        try:
+            analysis = _apply_tracking(
+                lab_id,
+                cam_id,
+                _analyze_frame_with_context(
+                    buf,
+                    frame,
+                    (
+                        position_seconds
+                        if isinstance(video_sources.get(key), str)
+                        else None
+                    ),
+                ),
+                (
+                    position_seconds
+                    if isinstance(video_sources.get(key), str)
+                    else None
+                ),
+                frame,
+            )
+            count_frame = _draw_count_frame(
+                frame,
+                analysis.get("behaviors", []),
+            )
+            with buf["lock"]:
+                if frame_buffers.get(key) is not buf:
+                    return
+                buf["annotated_frame"] = analysis.get("annotated_frame")
+                buf["count_frame"] = count_frame
+                buf["analysis_token"] = frame_token
+            _set_cached(lab_id, cam_id, analysis)
+            _maybe_record_realtime_stats(lab_id, cam_id, analysis)
+            last_token = frame_token
+        except Exception as error:
+            print(f"⚠️ realtime analysis failed {key}: {error}")
+
+        remaining = interval - (time.monotonic() - started)
+        if remaining > 0:
+            time.sleep(remaining)
+
+
 def _start_capture(lab_id, cam_id, source, metadata=None):
     """เริ่ม background thread สำหรับ (lab_id, cam_id)"""
     key = (lab_id, cam_id)
@@ -873,11 +1043,14 @@ def _start_capture(lab_id, cam_id, source, metadata=None):
         "annotated_frame": None,
         "count_frame": None,
         "frame_token": 0,
-        "count_token": -1,
+        "analysis_token": -1,
+        "context_objects": [],
+        "context_marker": None,
         "position_seconds": 0.0,
         "lock": threading.Lock(),
         "running": True,
         "thread": None,
+        "analysis_thread": None,
         "ended": False,
     }
     frame_buffers[key] = buf
@@ -901,6 +1074,14 @@ def _start_capture(lab_id, cam_id, source, metadata=None):
         processed_windows=0 if metadata.get("processing_mode") == "sampled" else None,
         **metadata,
     )
+    if metadata.get("processing_mode") != "sampled":
+        analysis_thread = threading.Thread(
+            target=_realtime_analysis_loop,
+            args=(key,),
+            daemon=True,
+        )
+        buf["analysis_thread"] = analysis_thread
+        analysis_thread.start()
     t = threading.Thread(target=_capture_loop, args=(key, metadata), daemon=True)
     buf["thread"] = t
     t.start()
@@ -915,6 +1096,9 @@ def _stop_capture(lab_id, cam_id):
         t = frame_buffers[key].get("thread")
         if t and t.is_alive():
             t.join(timeout=2.0)
+        analysis_thread = frame_buffers[key].get("analysis_thread")
+        if analysis_thread and analysis_thread.is_alive():
+            analysis_thread.join(timeout=10.0)
         _finalize_tracking(
             lab_id,
             cam_id,
@@ -986,20 +1170,11 @@ def _get_or_analyze(lab_id, cam_id, frame=None):
     with state_lock:
         source_state = source_states.get((lab_id, cam_id), {})
     if source_state.get("processing_mode") == "sampled":
-        return {
-            "total_people": 0,
-            "behaviors": [],
-            "summary": {
-                "attentive": 0,
-                "sleeping": 0,
-                "looking_down": 0,
-                "hand_raised": 0,
-                "standing": 0,
-                "unknown": 0,
-            },
-            "attention_rate": 0,
-            "annotated_frame": None,
-        }, False, None
+        return _empty_analysis(), False, None
+
+    active_buffer = frame_buffers.get((lab_id, cam_id))
+    if active_buffer and active_buffer.get("analysis_thread") is not None:
+        return _empty_analysis(), False, None
 
     analysis_lock = _get_analysis_lock(lab_id, cam_id)
     with analysis_lock:
@@ -1015,57 +1190,17 @@ def _get_or_analyze(lab_id, cam_id, frame=None):
         analysis = _apply_tracking(
             lab_id,
             cam_id,
-            analyze_frame(frame),
+            _analyze_frame_with_context(
+                active_buffer,
+                frame,
+                _source_observation_time(lab_id, cam_id),
+            ),
             _source_observation_time(lab_id, cam_id),
             frame,
         )
         _set_cached(lab_id, cam_id, analysis)
         _maybe_record_realtime_stats(lab_id, cam_id, analysis)
         return analysis, True, None
-
-
-def _annotate_count_frame(frame):
-    with detection_lock:
-        results = model(frame)
-    annotated_frame = results[0].plot()
-    boxes = results[0].boxes
-    people = 0
-    if boxes is not None:
-        for box in boxes:
-            if int(box.cls[0]) == 0:
-                people += 1
-
-    h, w = annotated_frame.shape[:2]
-    hud = f"People detected: {people}"
-    cv2.rectangle(annotated_frame, (0, h - 32), (w, h), (30, 30, 30), cv2.FILLED)
-    cv2.putText(
-        annotated_frame,
-        hud,
-        (8, h - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (220, 220, 220),
-        1,
-    )
-    return annotated_frame
-
-
-def _annotate_stream_frame(lab_id, cam_id, frame, mode):
-    if mode == "behavior":
-        analysis_lock = _get_analysis_lock(lab_id, cam_id)
-        with analysis_lock:
-            analysis = _apply_tracking(
-                lab_id,
-                cam_id,
-                analyze_frame(frame),
-                _source_observation_time(lab_id, cam_id),
-                frame,
-            )
-            _set_cached(lab_id, cam_id, analysis)
-            _maybe_record_realtime_stats(lab_id, cam_id, analysis)
-        annotated_frame = analysis.get("annotated_frame")
-        return annotated_frame if annotated_frame is not None else frame
-    return _annotate_count_frame(frame)
 
 
 def _sampled_stream_frame(lab_id, cam_id, frame, mode):
@@ -1078,19 +1213,8 @@ def _sampled_stream_frame(lab_id, cam_id, frame, mode):
         annotated_frame = _get_buffer_frame(lab_id, cam_id, "annotated_frame")
         return annotated_frame if annotated_frame is not None else frame
 
-    with buf["lock"]:
-        frame_token = buf["frame_token"]
-        cached_count_frame = buf.get("count_frame")
-        count_token = buf.get("count_token")
-    if cached_count_frame is not None and count_token == frame_token:
-        return cached_count_frame.copy()
-
-    annotated_frame = _annotate_count_frame(frame)
-    with buf["lock"]:
-        if buf["frame_token"] == frame_token:
-            buf["count_frame"] = annotated_frame
-            buf["count_token"] = frame_token
-    return annotated_frame
+    analysis = _get_cached(lab_id, cam_id) or _empty_analysis()
+    return _draw_count_frame(frame, analysis.get("behaviors", []))
 
 
 def _push_alert_unlocked(lab_id, alert_type, message):
@@ -1166,14 +1290,15 @@ def load_stats():
 # ✅ API 1: ส่งเฟรมภาพพร้อมกรอบตรวจจับ
 @app.route("/api/frame/<lab_id>/<int:cam_id>")
 def get_lab_frame(lab_id, cam_id):
-    frame, err = _read_frame(lab_id, cam_id)
+    frame = _get_buffer_frame(lab_id, cam_id, "count_frame")
+    if frame is None:
+        frame, err = _read_frame(lab_id, cam_id)
+    else:
+        err = None
     if err:
         return err
 
-    with detection_lock:
-        results = model(frame)
-    annotated_frame = results[0].plot()
-    _, buffer = cv2.imencode(".jpg", annotated_frame)
+    _, buffer = cv2.imencode(".jpg", frame)
     return Response(buffer.tobytes(), mimetype="image/jpeg")
 
 
@@ -1182,45 +1307,26 @@ def get_lab_frame(lab_id, cam_id):
 def get_lab_data(lab_id, cam_id):
     with state_lock:
         source_state = source_states.get((lab_id, cam_id), {})
-    if source_state.get("processing_mode") == "sampled":
-        analysis = _get_cached(lab_id, cam_id)
-        people_count = round(analysis["total_people"]) if analysis else 0
-        return jsonify({
-            "lab_id": lab_id,
-            "camera_id": cam_id,
-            "num_people": people_count,
-            "avg_confidence": 0,
-            "detected_objects": people_count,
-            "processing_mode": "sampled",
-        })
-
-    frame, err = _read_frame(lab_id, cam_id)
+    analysis, _, err = _get_or_analyze(lab_id, cam_id)
     if err:
         return err
-
-    with detection_lock:
-        results = model(frame)
-    boxes = results[0].boxes
-
-    num_people = 0
-    confs = []
-
-    for box in boxes:
-        cls_id = int(box.cls[0])
-        conf = float(box.conf[0])
-        confs.append(conf)
-        if cls_id == 0:
-            num_people += 1
-
-    avg_conf = round(sum(confs) / len(confs) * 100, 2) if confs else 0
-    print("🔍 Detections:", [(float(b.conf[0]), int(b.cls[0])) for b in boxes])
+    behaviors = analysis.get("behaviors", [])
+    confidences = [
+        float(item.get("detection_confidence") or 0)
+        for item in behaviors
+    ]
+    people_count = int(analysis.get("total_people") or 0)
 
     return jsonify({
         "lab_id": lab_id,
         "camera_id": cam_id,
-        "num_people": num_people,
-        "avg_confidence": avg_conf,
-        "detected_objects": len(confs)
+        "num_people": people_count,
+        "avg_confidence": round(
+            sum(confidences) / len(confidences),
+            2,
+        ) if confidences else 0,
+        "detected_objects": people_count,
+        "processing_mode": source_state.get("processing_mode", "realtime"),
     })
 
 
@@ -1367,7 +1473,7 @@ def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None)
 
     summary      = analysis["summary"]
     sleeping     = summary.get("sleeping", 0)
-    looking_down = summary.get("looking_down", 0)
+    phone_use    = summary.get("phone_use", 0)
 
     with state_lock:
         session_label = _session_label(lab_id)
@@ -1409,9 +1515,9 @@ def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None)
             activity_log[lab_id].appendleft({"time": time_str, "type": "alert", "message": msg})
             _push_alert_unlocked(lab_id, "alert", msg)
 
-        # • แจ้งเตือนถือโทรศัพท์จำนวนมาก
-        if looking_down >= 3:
-            msg = f"รอบวิเคราะห์ {session_label}: นักศึกษาก้มหน้า/โทรศัพท์ {looking_down} คน"
+        # • แจ้งเตือนเมื่อ object detector ยืนยันโทรศัพท์
+        if phone_use > 0:
+            msg = f"รอบวิเคราะห์ {session_label}: ตรวจพบการใช้โทรศัพท์ {phone_use} คน"
             _push_alert_unlocked(lab_id, "info", msg)
 
     # • บันทึกลง disk
@@ -1542,14 +1648,15 @@ def _gen_annotated_mjpeg(lab_id, cam_id, mode):
             if source_state.get("processing_mode") == "sampled":
                 annotated_frame = _sampled_stream_frame(lab_id, cam_id, frame, mode)
             else:
-                annotated_frame = _annotate_stream_frame(
+                annotated_frame = _get_buffer_frame(
                     lab_id,
                     cam_id,
-                    frame,
-                    mode,
+                    "annotated_frame" if mode == "behavior" else "count_frame",
                 )
+                if annotated_frame is None:
+                    annotated_frame = frame
         except Exception as e:
-            print(f"⚠️ annotated stream วิเคราะห์เฟรมไม่สำเร็จ: {e}")
+            print(f"⚠️ annotated stream อ่านผลวิเคราะห์ไม่สำเร็จ: {e}")
             annotated_frame = frame
 
         _, buf = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])

@@ -11,6 +11,8 @@ BEHAVIOR_KEYS = (
     "attentive",
     "sleeping",
     "looking_down",
+    "phone_use",
+    "phone_suspected",
     "hand_raised",
     "standing",
     "unknown",
@@ -19,12 +21,22 @@ ATTENTIVE_BEHAVIORS = {"attentive", "hand_raised"}
 
 DEFAULT_TRANSITION_SECONDS = {
     "attentive": 1.0,
-    "sleeping": 2.5,
-    "looking_down": 2.0,
-    "hand_raised": 0.8,
+    "sleeping": 8.0,
+    "looking_down": 3.0,
+    "phone_use": 3.0,
+    "phone_suspected": 4.0,
+    "hand_raised": 1.2,
     "standing": 1.0,
     "unknown": 1.5,
 }
+
+DEBOUNCED_INITIAL_BEHAVIORS = frozenset({
+    "sleeping",
+    "looking_down",
+    "phone_use",
+    "phone_suspected",
+    "hand_raised",
+})
 
 
 def _clean_bbox(value):
@@ -64,6 +76,18 @@ def _center_distance_ratio(left, right):
     right_diag = math.hypot(right[2] - right[0], right[3] - right[1])
     scale = max(1.0, left_diag, right_diag)
     return distance / scale
+
+
+def _bottom_center_distance_ratio(left, right):
+    left_anchor = ((left[0] + left[2]) / 2, left[3])
+    right_anchor = ((right[0] + right[2]) / 2, right[3])
+    distance = math.hypot(
+        left_anchor[0] - right_anchor[0],
+        left_anchor[1] - right_anchor[1],
+    )
+    left_diag = math.hypot(left[2] - left[0], left[3] - left[1])
+    right_diag = math.hypot(right[2] - right[0], right[3] - right[1])
+    return distance / max(1.0, left_diag, right_diag)
 
 
 def _blank_behavior_values():
@@ -121,6 +145,8 @@ class TrackState:
     events: list = field(default_factory=list)
     buckets: dict = field(default_factory=dict)
     active: bool = True
+    position_bbox: tuple | None = None
+    position_samples: int = 0
 
     def current_event(self):
         return self.events[-1] if self.events else None
@@ -139,6 +165,10 @@ class SessionTracker:
         transition_seconds=None,
         min_iou=0.05,
         max_center_distance=0.85,
+        position_matching=True,
+        position_memory_seconds=21600,
+        max_position_distance=0.45,
+        require_contiguous_transitions=False,
     ):
         self.max_missing_seconds = max(0.1, float(max_missing_seconds))
         self.observation_step_seconds = max(
@@ -155,6 +185,18 @@ class SessionTracker:
             self.transition_seconds.update(transition_seconds)
         self.min_iou = max(0.0, float(min_iou))
         self.max_center_distance = max(0.1, float(max_center_distance))
+        self.position_matching = bool(position_matching)
+        self.position_memory_seconds = max(
+            self.max_missing_seconds,
+            float(position_memory_seconds),
+        )
+        self.max_position_distance = max(
+            0.1,
+            float(max_position_distance),
+        )
+        self.require_contiguous_transitions = bool(
+            require_contiguous_transitions
+        )
         self._tracks = {}
         self._next_track_id = 1
         self._origin = time.monotonic()
@@ -224,6 +266,14 @@ class SessionTracker:
             track.pending_since = None
             return False
 
+        if (
+            self.require_contiguous_transitions
+            and timestamp - track.last_seen > self.max_observation_gap_seconds
+        ):
+            track.pending_behavior = observed
+            track.pending_since = timestamp
+            return False
+
         if track.pending_behavior != observed:
             track.pending_behavior = observed
             track.pending_since = timestamp
@@ -239,15 +289,30 @@ class SessionTracker:
         return True
 
     def _create_track(self, detection, timestamp):
-        behavior = detection.get("behavior", "unknown")
-        if behavior not in BEHAVIOR_KEYS:
-            behavior = "unknown"
+        observed_behavior = detection.get("behavior", "unknown")
+        if observed_behavior not in BEHAVIOR_KEYS:
+            observed_behavior = "unknown"
+        behavior = (
+            "unknown"
+            if observed_behavior in DEBOUNCED_INITIAL_BEHAVIORS
+            else observed_behavior
+        )
         track = TrackState(
             track_id=self._next_track_id,
             bbox=detection["bbox"],
             first_seen=timestamp,
             last_seen=timestamp,
             current_behavior=behavior,
+            position_bbox=(
+                None
+                if observed_behavior == "standing"
+                else detection["bbox"]
+            ),
+            position_samples=0 if observed_behavior == "standing" else 1,
+            pending_behavior=(
+                observed_behavior if behavior != observed_behavior else None
+            ),
+            pending_since=timestamp if behavior != observed_behavior else None,
         )
         self._next_track_id += 1
         self._tracks[track.track_id] = track
@@ -259,13 +324,59 @@ class SessionTracker:
         )
         return track
 
+    def _update_position(self, track, detection):
+        if detection.get("behavior") == "standing":
+            return
+        if track.position_bbox is None:
+            track.position_bbox = detection["bbox"]
+            track.position_samples = 1
+            return
+
+        weight = min(20, max(1, track.position_samples))
+        track.position_bbox = tuple(
+            ((old_value * weight) + new_value) / (weight + 1)
+            for old_value, new_value in zip(
+                track.position_bbox,
+                detection["bbox"],
+            )
+        )
+        track.position_samples = min(20, track.position_samples + 1)
+
     def _match(self, detections, timestamp):
         candidates = []
         for track in self._tracks.values():
-            if timestamp - track.last_seen > self.max_missing_seconds:
+            missing_seconds = timestamp - track.last_seen
+            if (
+                missing_seconds > self.max_missing_seconds
+                and (
+                    not self.position_matching
+                    or missing_seconds > self.position_memory_seconds
+                )
+            ):
                 track.active = False
                 continue
             for detection_index, detection in enumerate(detections):
+                if missing_seconds > self.max_missing_seconds:
+                    track.active = False
+                    if detection.get("behavior") == "standing":
+                        continue
+                    position_bbox = track.position_bbox
+                    if position_bbox is None:
+                        continue
+                    position_distance = _bottom_center_distance_ratio(
+                        position_bbox,
+                        detection["bbox"],
+                    )
+                    if position_distance > self.max_position_distance:
+                        continue
+                    candidates.append((
+                        0,
+                        max(0.0, 1.0 - position_distance),
+                        track.track_id,
+                        detection_index,
+                    ))
+                    continue
+
                 iou = _bbox_iou(track.bbox, detection["bbox"])
                 center_ratio = _center_distance_ratio(
                     track.bbox,
@@ -274,14 +385,20 @@ class SessionTracker:
                 if iou < self.min_iou and center_ratio > self.max_center_distance:
                     continue
                 score = (iou * 2.0) + max(0.0, 1.0 - center_ratio)
-                candidates.append(
-                    (score, track.track_id, detection_index),
-                )
+                candidates.append((
+                    1,
+                    score,
+                    track.track_id,
+                    detection_index,
+                ))
 
         matches = {}
         used_tracks = set()
         used_detections = set()
-        for _, track_id, detection_index in sorted(candidates, reverse=True):
+        for _, _, track_id, detection_index in sorted(
+            candidates,
+            reverse=True,
+        ):
             if track_id in used_tracks or detection_index in used_detections:
                 continue
             matches[detection_index] = self._tracks[track_id]
@@ -306,9 +423,45 @@ class SessionTracker:
             for detection_index, detection in enumerate(prepared):
                 track = matches.get(detection_index)
                 is_new_track = track is None
+                reacquired = (
+                    track is not None
+                    and timestamp - track.last_seen > self.max_missing_seconds
+                )
                 event_started = is_new_track
                 if track is None:
                     track = self._create_track(detection, timestamp)
+                elif reacquired:
+                    observed_behavior = detection.get("behavior", "unknown")
+                    if observed_behavior not in BEHAVIOR_KEYS:
+                        observed_behavior = "unknown"
+                    behavior = (
+                        "unknown"
+                        if observed_behavior in DEBOUNCED_INITIAL_BEHAVIORS
+                        else observed_behavior
+                    )
+                    self._begin_event(
+                        track,
+                        behavior,
+                        timestamp,
+                    )
+                    track.pending_behavior = (
+                        observed_behavior
+                        if behavior != observed_behavior
+                        else None
+                    )
+                    track.pending_since = (
+                        timestamp if behavior != observed_behavior else None
+                    )
+                    self._record_observation(
+                        track,
+                        timestamp,
+                        detection.get("confidence", 0),
+                    )
+                    event_started = True
+                    track.bbox = detection["bbox"]
+                    track.last_seen = timestamp
+                    track.active = True
+                    self._update_position(track, detection)
                 else:
                     self._record_observation(
                         track,
@@ -323,6 +476,7 @@ class SessionTracker:
                     track.bbox = detection["bbox"]
                     track.last_seen = timestamp
                     track.active = True
+                    self._update_position(track, detection)
 
                 item = dict(detection)
                 item["raw_behavior"] = detection.get("behavior", "unknown")
@@ -330,6 +484,7 @@ class SessionTracker:
                 item["track_id"] = track.track_id
                 item["track_attention_rate"] = self._attention_rate(track)
                 item["is_new_track"] = is_new_track
+                item["reacquired"] = reacquired
                 item["event_started"] = event_started
                 current_event = track.current_event()
                 item["event_index"] = (

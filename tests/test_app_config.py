@@ -77,10 +77,17 @@ class AppConfigTests(unittest.TestCase):
                 ]),
                 "CLASSMOOD_MAX_HISTORY": "2",
                 "CLASSMOOD_ANNOTATED_STREAM_FPS": "99",
+                "CLASSMOOD_CONTEXT_DETECTION_ENABLED": "false",
+                "CLASSMOOD_CONTEXT_DETECTION_INTERVAL": "0.1",
+                "CLASSMOOD_CONTEXT_DETECTION_CONFIDENCE": "9",
+                "CLASSMOOD_CONTEXT_DETECTION_IMAGE_SIZE": "100",
                 "CLASSMOOD_LONG_VIDEO_SAMPLE_INTERVAL_SECONDS": "30",
                 "CLASSMOOD_LONG_VIDEO_SAMPLE_WINDOW_SECONDS": "45",
                 "CLASSMOOD_LONG_VIDEO_SAMPLE_FPS": "20",
                 "CLASSMOOD_EVIDENCE_ENABLED": "false",
+                "CLASSMOOD_TRACK_POSITION_MEMORY_SECONDS": "10",
+                "CLASSMOOD_TRACK_POSITION_MAX_DISTANCE": "9",
+                "CLASSMOOD_TRACK_POSITION_ENABLED": "false",
                 "CLASSMOOD_ALLOW_ANY_VIDEO_PATH": "true",
                 "CLASSMOOD_PORT": "invalid",
             }
@@ -89,10 +96,17 @@ class AppConfigTests(unittest.TestCase):
 
             self.assertEqual(config.max_history, 30)
             self.assertEqual(config.annotated_stream_fps, 5)
+            self.assertFalse(config.context_detection_enabled)
+            self.assertEqual(config.context_detection_interval, 0.5)
+            self.assertEqual(config.context_detection_confidence, 0.8)
+            self.assertEqual(config.context_detection_image_size, 640)
             self.assertEqual(config.long_video_sample_interval_seconds, 30)
             self.assertEqual(config.long_video_sample_window_seconds, 30)
             self.assertEqual(config.long_video_sample_fps, 5.0)
             self.assertFalse(config.evidence_enabled)
+            self.assertEqual(config.track_position_memory_seconds, 60.0)
+            self.assertEqual(config.track_position_max_distance, 2.0)
+            self.assertFalse(config.track_position_enabled)
             self.assertTrue(config.allow_any_video_path)
             self.assertFalse(config.allow_remote_source_control)
             self.assertEqual(config.port, 5000)

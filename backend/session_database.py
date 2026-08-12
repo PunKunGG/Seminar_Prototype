@@ -485,7 +485,9 @@ class SessionDatabase:
                     "tracks": [],
                     "period_seconds": period_seconds,
                     "periods": [],
+                    "events": [],
                     "evidence": [],
+                    "representative_evidence": [],
                 }
             track_rows = connection.execute(
                 """
@@ -502,6 +504,15 @@ class SessionDatabase:
                 FROM track_time_buckets
                 WHERE session_id = ?
                 ORDER BY bucket_start_seconds, track_id
+                """,
+                (session_id,),
+            ).fetchall()
+            event_rows = connection.execute(
+                """
+                SELECT *
+                FROM behavior_events
+                WHERE session_id = ?
+                ORDER BY track_id, start_seconds, event_index
                 """,
                 (session_id,),
             ).fetchall()
@@ -570,6 +581,33 @@ class SessionDatabase:
                 ],
             })
 
+        events = [
+            {
+                "track_id": int(row["track_id"]),
+                "event_index": int(row["event_index"]),
+                "behavior": row["behavior"],
+                "start_seconds": round(float(row["start_seconds"]), 3),
+                "end_seconds": round(float(row["end_seconds"]), 3),
+                "start_time": self._timestamp_label(
+                    metadata["recording_started_at"],
+                    row["start_seconds"],
+                ),
+                "end_time": self._timestamp_label(
+                    metadata["recording_started_at"],
+                    row["end_seconds"],
+                ),
+                "duration_seconds": round(
+                    float(row["duration_seconds"]),
+                    1,
+                ),
+                "avg_confidence": round(
+                    float(row["avg_confidence"]),
+                    1,
+                ),
+            }
+            for row in event_rows
+        ]
+
         evidence = []
         for row in evidence_rows:
             item = {
@@ -612,10 +650,21 @@ class SessionDatabase:
                 }
             evidence.append(item)
 
+        representative_evidence = []
+        represented_tracks = set()
+        for item in evidence:
+            track_id = item["track_id"]
+            if track_id in represented_tracks:
+                continue
+            represented_tracks.add(track_id)
+            representative_evidence.append(dict(item))
+
         return {
             "session": metadata,
             "tracks": tracks,
             "period_seconds": period_seconds,
             "periods": periods,
+            "events": events,
             "evidence": evidence,
+            "representative_evidence": representative_evidence,
         }

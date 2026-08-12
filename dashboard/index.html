@@ -340,7 +340,7 @@
         <!-- Camera Views and Statistics -->
         <div class="grid lg:grid-cols-3 gap-6 items-start">
           <!-- Camera Feed -->
-          <div class="lg:col-span-2 space-y-4">
+          <div class="min-w-0 lg:col-span-2 space-y-4">
             <div class="bg-white rounded-xl shadow-lg p-6">
               <div class="flex items-center justify-between mb-4">
                 <h3 class="text-lg font-semibold text-gray-800">
@@ -405,23 +405,25 @@
             <div class="bg-white rounded-xl shadow-lg p-6">
               <div class="flex flex-col gap-1 mb-4 sm:flex-row sm:items-end sm:justify-between">
                 <h3 class="text-lg font-semibold text-gray-800">
-                  ผลวิเคราะห์รายบุคคล
+                  ผลวิเคราะห์ตามตำแหน่ง
                 </h3>
-                <span class="text-xs text-gray-500">ID ใช้เฉพาะภายในรอบนี้</span>
+                <span class="text-xs text-gray-500">Position ID ใช้เฉพาะภายในรอบนี้</span>
               </div>
               <p id="liveTrackEmpty" class="text-sm text-gray-500">
                 รอข้อมูลการติดตามบุคคล
               </p>
               <div class="overflow-x-auto">
-                <table class="w-full min-w-[760px] text-sm">
+                <table class="w-full min-w-[980px] text-sm">
                   <thead class="bg-gray-50 text-gray-600">
                     <tr>
-                      <th class="px-3 py-2 text-left font-semibold">บุคคล</th>
+                      <th class="px-3 py-2 text-left font-semibold">ตำแหน่ง</th>
                       <th class="px-3 py-2 text-left font-semibold">พฤติกรรมล่าสุด</th>
                       <th class="px-3 py-2 text-right font-semibold">เวลาที่ตรวจพบ</th>
                       <th class="px-3 py-2 text-right font-semibold">ตั้งใจ (%)</th>
                       <th class="px-3 py-2 text-right font-semibold">หลับ (ครั้ง)</th>
                       <th class="px-3 py-2 text-right font-semibold">ก้มหน้า (ครั้ง)</th>
+                      <th class="px-3 py-2 text-right font-semibold">โทรศัพท์ (ครั้ง)</th>
+                      <th class="px-3 py-2 text-right font-semibold">สงสัยโทรศัพท์ (ครั้ง)</th>
                       <th class="px-3 py-2 text-right font-semibold">ยกมือ (ครั้ง)</th>
                       <th class="px-3 py-2 text-right font-semibold">ยืน (ครั้ง)</th>
                     </tr>
@@ -433,7 +435,7 @@
           </div>
 
           <!-- Statistics Panel -->
-          <div class="space-y-4">
+          <div class="min-w-0 space-y-4">
             <!-- Activity Analysis -->
             <div class="bg-white rounded-xl shadow-lg p-6">
               <h3 class="text-lg font-semibold text-gray-800 mb-4">
@@ -457,10 +459,26 @@
                   >
                 </div>
                 <div class="flex items-center justify-between text-sm">
-                  <span class="text-gray-600">ก้มหน้า/โทรศัพท์</span>
+                  <span class="text-gray-600">ก้มหน้า</span>
                   <span
                     id="behaviorLookingDown"
                     class="bg-orange-100 text-orange-800 px-2 py-1 rounded"
+                    >0 คน</span
+                  >
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                  <span class="text-gray-600">ใช้โทรศัพท์</span>
+                  <span
+                    id="behaviorPhoneUse"
+                    class="bg-amber-100 text-amber-800 px-2 py-1 rounded"
+                    >0 คน</span
+                  >
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                  <span class="text-gray-600">สงสัยใช้โทรศัพท์</span>
+                  <span
+                    id="behaviorPhoneSuspected"
+                    class="bg-yellow-100 text-yellow-800 px-2 py-1 rounded"
                     >0 คน</span
                   >
                 </div>
@@ -624,6 +642,20 @@
                     >- คน</span
                   >
                 </div>
+                <div class="flex justify-between bg-amber-50 px-3 py-1 rounded">
+                  <span class="text-gray-600">ใช้โทรศัพท์</span>
+                  <span class="font-medium text-amber-700" id="reportPhoneUse"
+                    >- คน</span
+                  >
+                </div>
+                <div class="flex justify-between bg-yellow-50 px-3 py-1 rounded">
+                  <span class="text-gray-600">สงสัยใช้โทรศัพท์</span>
+                  <span
+                    class="font-medium text-yellow-700"
+                    id="reportPhoneSuspected"
+                    >- คน</span
+                  >
+                </div>
                 <div class="flex justify-between bg-sky-50 px-3 py-1 rounded">
                   <span class="text-gray-600">ยกมือ</span>
                   <span class="font-medium text-sky-700" id="reportHandRaised"
@@ -666,7 +698,7 @@
                 id="reportTimelineTableWrapper"
                 class="overflow-x-auto border border-gray-200 rounded-lg"
               >
-                <table class="w-full min-w-[920px] text-xs text-left">
+                <table class="w-full min-w-[1080px] text-xs text-left">
                   <thead class="bg-gray-100 text-gray-700">
                     <tr>
                       <th class="px-3 py-2 font-semibold">ช่วงในคลิป</th>
@@ -675,6 +707,8 @@
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจเรียน</th>
                       <th class="px-3 py-2 font-semibold text-right">หลับ</th>
                       <th class="px-3 py-2 font-semibold text-right">ก้มหน้า</th>
+                      <th class="px-3 py-2 font-semibold text-right">ใช้โทรศัพท์</th>
+                      <th class="px-3 py-2 font-semibold text-right">สงสัยโทรศัพท์</th>
                       <th class="px-3 py-2 font-semibold text-right">ยกมือ</th>
                       <th class="px-3 py-2 font-semibold text-right">ยืน/ลุก</th>
                       <th class="px-3 py-2 font-semibold text-right">ไม่ชัดเจน</th>
@@ -688,26 +722,28 @@
             <div id="reportTrackingSection" class="hidden">
               <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
                 <h4 class="font-semibold text-gray-800">
-                  สรุปรายบุคคลตามช่วงเวลา
+                  สรุปตามตำแหน่งและช่วงเวลา
                 </h4>
                 <span class="text-xs text-gray-500">
-                  Anonymous ID แบ่งช่วงละ 1 ชั่วโมง
+                  Position ID แบ่งช่วงละ 1 ชั่วโมง
                 </span>
               </div>
               <div
                 id="reportTrackingTableWrapper"
                 class="overflow-x-auto border border-gray-200 rounded-lg"
               >
-                <table class="w-full min-w-[1040px] text-xs text-left">
+                <table class="w-full min-w-[1240px] text-xs text-left">
                   <thead class="bg-gray-100 text-gray-700">
                     <tr>
                       <th class="px-3 py-2 font-semibold">ช่วงเวลา</th>
-                      <th class="px-3 py-2 font-semibold">บุคคล</th>
+                      <th class="px-3 py-2 font-semibold">ตำแหน่ง</th>
                       <th class="px-3 py-2 font-semibold text-right">เวลาที่ตรวจพบ</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (%)</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (ครั้ง)</th>
                       <th class="px-3 py-2 font-semibold text-right">หลับ (ครั้ง)</th>
                       <th class="px-3 py-2 font-semibold text-right">ก้มหน้า (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">โทรศัพท์ (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">สงสัยโทรศัพท์ (ครั้ง)</th>
                       <th class="px-3 py-2 font-semibold text-right">ยกมือ (ครั้ง)</th>
                       <th class="px-3 py-2 font-semibold text-right">ยืน (ครั้ง)</th>
                       <th class="px-3 py-2 font-semibold text-right">ไม่ชัดเจน (ครั้ง)</th>
@@ -721,14 +757,46 @@
               </div>
             </div>
 
+            <div id="reportBehaviorEventsSection" class="hidden">
+              <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
+                <h4 class="font-semibold text-gray-800">
+                  ช่วงพฤติกรรมตามตำแหน่ง
+                </h4>
+                <span id="reportBehaviorEventsCaption" class="text-xs text-gray-500">
+                  0 ช่วง
+                </span>
+              </div>
+              <div
+                id="reportBehaviorEventsTableWrapper"
+                class="overflow-x-auto border border-gray-200 rounded-lg"
+              >
+                <table class="w-full min-w-[760px] text-xs text-left">
+                  <thead class="bg-gray-100 text-gray-700">
+                    <tr>
+                      <th class="px-3 py-2 font-semibold">รหัสตำแหน่ง</th>
+                      <th class="px-3 py-2 font-semibold">เริ่ม</th>
+                      <th class="px-3 py-2 font-semibold">สิ้นสุด</th>
+                      <th class="px-3 py-2 font-semibold">พฤติกรรม</th>
+                      <th class="px-3 py-2 font-semibold text-right">ระยะเวลา</th>
+                      <th class="px-3 py-2 font-semibold text-right">ความมั่นใจ</th>
+                    </tr>
+                  </thead>
+                  <tbody
+                    id="reportBehaviorEventRows"
+                    class="divide-y divide-gray-100"
+                  ></tbody>
+                </table>
+              </div>
+            </div>
+
             <div id="reportEvidenceSection" class="hidden">
               <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                   <h4 class="font-semibold text-gray-800">
-                    ภาพหลักฐานประกอบเหตุการณ์
+                    ภาพอ้างอิงรายตำแหน่ง
                   </h4>
                   <p class="mt-1 text-xs text-gray-500">
-                    ใช้อ้างอิงภายในคาบนี้ ไม่ใช่การระบุตัวตนข้ามคาบ
+                    ภาพตัวแทนและพฤติกรรม ณ เวลาที่บันทึก
                   </p>
                 </div>
                 <span id="reportEvidenceCaption" class="text-xs text-gray-500">

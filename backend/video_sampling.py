@@ -5,6 +5,8 @@ BEHAVIOR_KEYS = (
     "attentive",
     "sleeping",
     "looking_down",
+    "phone_use",
+    "phone_suspected",
     "hand_raised",
     "standing",
     "unknown",

@@ -96,7 +96,9 @@ function behaviorLabel(value) {
   return {
     attentive: "ตั้งใจเรียน",
     sleeping: "หลับ",
-    looking_down: "ก้มหน้า/โทรศัพท์",
+    looking_down: "ก้มหน้า",
+    phone_use: "ใช้โทรศัพท์",
+    phone_suspected: "สงสัยใช้โทรศัพท์",
     hand_raised: "ยกมือ",
     standing: "ยืน/ลุก",
     unknown: "ไม่ชัดเจน",
@@ -123,6 +125,8 @@ function renderLiveTracks(tracks = []) {
           <td class="px-3 py-2 text-right font-semibold text-green-700">${formatDecimal(track.attention_rate)}%</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.sleeping)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.looking_down)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.phone_use)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.phone_suspected)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.hand_raised)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.standing)}</td>
         </tr>
@@ -164,6 +168,8 @@ function renderTrackingReport(tracking = null) {
           <td class="px-3 py-2 text-right">${toWholePeople(counts.attentive)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.sleeping)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.looking_down)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.phone_use)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(counts.phone_suspected)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.hand_raised)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.standing)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.unknown)}</td>
@@ -179,30 +185,44 @@ function renderEvidenceReport(tracking = null) {
   const caption = document.getElementById("reportEvidenceCaption");
   if (!section || !gallery || !caption) return;
 
-  const evidence = tracking?.evidence || [];
+  const allEvidence = tracking?.evidence || [];
+  const representativeEvidence = tracking?.representative_evidence || [];
+  const evidence = representativeEvidence.length
+    ? representativeEvidence
+    : Array.from(
+        allEvidence.reduce((items, item) => {
+          const trackId = Number(item.track_id);
+          if (!items.has(trackId)) items.set(trackId, item);
+          return items;
+        }, new Map()).values(),
+      );
+  const tracksById = new Map(
+    (tracking?.tracks || []).map((track) => [Number(track.track_id), track]),
+  );
   const displayLimit = 60;
-  const references = evidence.filter((item) => item.kind === "reference");
-  const events = evidence.filter((item) => item.kind !== "reference");
-  const visibleEvidence = [
-    ...references.slice(0, displayLimit),
-    ...events.slice(0, Math.max(0, displayLimit - references.length)),
-  ];
+  const visibleEvidence = evidence.slice(0, displayLimit);
   section.classList.toggle("hidden", visibleEvidence.length === 0);
   caption.textContent =
     evidence.length > displayLimit
-      ? `แสดง ${displayLimit} จาก ${evidence.length} ภาพ`
-      : `${evidence.length} ภาพ`;
+      ? `แสดง ${displayLimit} จาก ${evidence.length} ID`
+      : `${evidence.length} ID`;
 
   gallery.innerHTML = visibleEvidence
     .map((item) => {
-      const event = item.event || {};
-      const isReference = item.kind === "reference";
-      const title = isReference
-        ? `ID ${toWholePeople(item.track_id)} - ภาพอ้างอิง`
-        : `ID ${toWholePeople(item.track_id)} - ${behaviorLabel(item.behavior)}`;
-      const detail = isReference
-        ? `ตรวจพบครั้งแรก ${item.captured_time || "-"}`
-        : `${item.captured_time || "-"} | ${formatDuration(event.duration_seconds)} | มั่นใจ ${formatDecimal(event.avg_confidence)}%`;
+      const track = tracksById.get(Number(item.track_id)) || {};
+      const durations = Object.entries(track.behavior_seconds || {})
+        .filter(([, seconds]) => Number(seconds) > 0)
+        .sort((left, right) => Number(right[1]) - Number(left[1]))
+        .slice(0, 3)
+        .map(([behavior, seconds]) =>
+          `${behaviorLabel(behavior)} ${formatDuration(seconds)}`,
+        )
+        .join(" | ");
+      const title = `ID ${toWholePeople(item.track_id)} - ภาพอ้างอิง / ${behaviorLabel(item.behavior)}`;
+      const detail = [
+        `บันทึก ${item.captured_time || "-"}`,
+        durations,
+      ].filter(Boolean).join(" | ");
       return `
         <figure class="min-w-0 border border-gray-200 rounded-lg overflow-hidden bg-white">
           <img
@@ -217,6 +237,33 @@ function renderEvidenceReport(tracking = null) {
         </figure>
       `;
     })
+    .join("");
+}
+
+function renderBehaviorEvents(tracking = null) {
+  const section = document.getElementById("reportBehaviorEventsSection");
+  const body = document.getElementById("reportBehaviorEventRows");
+  const caption = document.getElementById("reportBehaviorEventsCaption");
+  if (!section || !body || !caption) return;
+
+  const events = tracking?.events || [];
+  const displayLimit = 300;
+  const visibleEvents = events.slice(0, displayLimit);
+  section.classList.toggle("hidden", visibleEvents.length === 0);
+  caption.textContent = events.length > displayLimit
+    ? `แสดง ${displayLimit} จาก ${events.length} ช่วง`
+    : `${events.length} ช่วง`;
+  body.innerHTML = visibleEvents
+    .map((event, index) => `
+      <tr class="${index % 2 === 0 ? "bg-white" : "bg-gray-50"}">
+        <td class="px-3 py-2 font-semibold text-blue-700 whitespace-nowrap">ID ${toWholePeople(event.track_id)}</td>
+        <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(event.start_time || "-")}</td>
+        <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(event.end_time || "-")}</td>
+        <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(behaviorLabel(event.behavior))}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(event.duration_seconds)}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">${formatDecimal(event.avg_confidence)}%</td>
+      </tr>
+    `)
     .join("");
 }
 
@@ -248,6 +295,8 @@ function renderReportTimeline(periods = [], periodSeconds = 600) {
           <td class="px-3 py-2 text-right">${toWholePeople(summary.attentive)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(summary.sleeping)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(summary.looking_down)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.phone_use)}</td>
+          <td class="px-3 py-2 text-right">${toWholePeople(summary.phone_suspected)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(summary.hand_raised)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(summary.standing)}</td>
           <td class="px-3 py-2 text-right">${toWholePeople(summary.unknown)}</td>
@@ -417,6 +466,8 @@ function updateBehaviorStats(data) {
   const attentiveEl = document.getElementById("behaviorAttentive");
   const sleepingEl = document.getElementById("behaviorSleeping");
   const lookingDownEl = document.getElementById("behaviorLookingDown");
+  const phoneUseEl = document.getElementById("behaviorPhoneUse");
+  const phoneSuspectedEl = document.getElementById("behaviorPhoneSuspected");
   const handRaisedEl = document.getElementById("behaviorHandRaised");
   const standingEl = document.getElementById("behaviorStanding");
   const unknownEl = document.getElementById("behaviorUnknown");
@@ -431,6 +482,10 @@ function updateBehaviorStats(data) {
       sleepingEl.textContent = `${toWholePeople(data.summary.sleeping)} คน`;
     if (lookingDownEl)
       lookingDownEl.textContent = `${toWholePeople(data.summary.looking_down)} คน`;
+    if (phoneUseEl)
+      phoneUseEl.textContent = `${toWholePeople(data.summary.phone_use)} คน`;
+    if (phoneSuspectedEl)
+      phoneSuspectedEl.textContent = `${toWholePeople(data.summary.phone_suspected)} คน`;
     if (handRaisedEl)
       handRaisedEl.textContent = `${toWholePeople(data.summary.hand_raised)} คน`;
     if (standingEl)
@@ -721,6 +776,8 @@ function downloadReport(format) {
       behavior_attentive: reportBehavior.attentive || 0,
       behavior_sleeping: reportBehavior.sleeping || 0,
       behavior_looking_down: reportBehavior.looking_down || 0,
+      behavior_phone_use: reportBehavior.phone_use || 0,
+      behavior_phone_suspected: reportBehavior.phone_suspected || 0,
       behavior_hand_raised: reportBehavior.hand_raised || 0,
       behavior_standing: reportBehavior.standing || 0,
       behavior_unknown: reportBehavior.unknown || 0,
@@ -742,6 +799,8 @@ function downloadReport(format) {
       behavior_attentive: 0,
       behavior_sleeping: 0,
       behavior_looking_down: 0,
+      behavior_phone_use: 0,
+      behavior_phone_suspected: 0,
       behavior_hand_raised: 0,
       behavior_standing: 0,
       behavior_unknown: 0,
@@ -803,15 +862,17 @@ function appendTrackingExportRows(rows) {
   if (!reportRows.length) return;
 
   rows.push([]);
-  rows.push(["สรุปรายบุคคล (Anonymous ID)"]);
+  rows.push(["สรุปตามรหัสตำแหน่ง (Position ID)"]);
   rows.push([
     "ช่วงเวลา",
-    "รหัสบุคคล",
+    "รหัสตำแหน่ง",
     "เวลาที่ตรวจพบ (วินาที)",
     "ความตั้งใจ (%)",
     "ตั้งใจเรียน (ครั้ง)",
     "หลับ (ครั้ง)",
-    "ก้มหน้า/โทรศัพท์ (ครั้ง)",
+    "ก้มหน้า (ครั้ง)",
+    "ใช้โทรศัพท์ (ครั้ง)",
+    "สงสัยใช้โทรศัพท์ (ครั้ง)",
     "ยกมือ (ครั้ง)",
     "ยืน/ลุก (ครั้ง)",
     "ไม่ชัดเจน (ครั้ง)",
@@ -826,34 +887,53 @@ function appendTrackingExportRows(rows) {
       toWholePeople(counts.attentive),
       toWholePeople(counts.sleeping),
       toWholePeople(counts.looking_down),
+      toWholePeople(counts.phone_use),
+      toWholePeople(counts.phone_suspected),
       toWholePeople(counts.hand_raised),
       toWholePeople(counts.standing),
       toWholePeople(counts.unknown),
     ]);
   }
 
-  const evidence = tracking.evidence || [];
+  const behaviorEvents = tracking.events || [];
+  if (behaviorEvents.length) {
+    rows.push([]);
+    rows.push(["ช่วงพฤติกรรมตามตำแหน่ง"]);
+    rows.push([
+      "รหัสตำแหน่ง",
+      "เวลาเริ่ม",
+      "เวลาสิ้นสุด",
+      "พฤติกรรม",
+      "ระยะเวลา (วินาที)",
+      "ความมั่นใจ (%)",
+    ]);
+    for (const event of behaviorEvents) {
+      rows.push([
+        `ID ${event.track_id}`,
+        event.start_time,
+        event.end_time,
+        behaviorLabel(event.behavior),
+        event.duration_seconds,
+        event.avg_confidence,
+      ]);
+    }
+  }
+
+  const evidence = tracking.representative_evidence || [];
   if (!evidence.length) return;
   rows.push([]);
-  rows.push(["ภาพหลักฐานประกอบเหตุการณ์"]);
+  rows.push(["ภาพอ้างอิงและพฤติกรรมรายตำแหน่ง"]);
   rows.push([
-    "รหัสบุคคล",
-    "ประเภทภาพ",
+    "รหัสตำแหน่ง",
     "เวลา",
-    "พฤติกรรม",
-    "ระยะเวลา (วินาที)",
-    "ความมั่นใจ (%)",
+    "พฤติกรรมในภาพ",
     "ชื่อไฟล์",
   ]);
   for (const item of evidence) {
-    const event = item.event || {};
     rows.push([
       `ID ${item.track_id}`,
-      item.kind === "reference" ? "ภาพอ้างอิง" : "ภาพเหตุการณ์",
       item.captured_time,
       behaviorLabel(item.behavior),
-      item.kind === "event" ? event.duration_seconds : "",
-      item.kind === "event" ? event.avg_confidence : "",
       item.filename,
     ]);
   }
@@ -879,6 +959,8 @@ function buildCSV(data) {
     ["ตั้งใจเรียน (คน)", data.behavior_attentive],
     ["หลับ (คน)", data.behavior_sleeping],
     ["ก้มหน้า (คน)", data.behavior_looking_down],
+    ["ใช้โทรศัพท์ (คน)", data.behavior_phone_use],
+    ["สงสัยใช้โทรศัพท์ (คน)", data.behavior_phone_suspected],
     ["ยกมือ (คน)", data.behavior_hand_raised],
     ["ยืน/ลุก (คน)", data.behavior_standing],
     ["ไม่ชัดเจน (คน)", data.behavior_unknown],
@@ -893,7 +975,7 @@ function buildCSV(data) {
     rows.push(["สรุปตามช่วงเวลา"]);
     rows.push([
       "ช่วงในคลิป", "คนเฉลี่ย", "ความตั้งใจ (%)", "ตั้งใจเรียน",
-      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+      "หลับ", "ก้มหน้า", "ใช้โทรศัพท์", "สงสัยใช้โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
     ]);
     for (const period of latestExportData.periods) {
       const summary = period.summary || {};
@@ -904,6 +986,8 @@ function buildCSV(data) {
         toWholePeople(summary.attentive),
         toWholePeople(summary.sleeping),
         toWholePeople(summary.looking_down),
+        toWholePeople(summary.phone_use),
+        toWholePeople(summary.phone_suspected),
         toWholePeople(summary.hand_raised),
         toWholePeople(summary.standing),
         toWholePeople(summary.unknown),
@@ -923,7 +1007,7 @@ function buildCSV(data) {
     rows.push(["ข้อมูลย้อนหลัง"]);
     rows.push([
       "เวลา", "ความตั้งใจ (%)", "จำนวนคน", "ตั้งใจเรียน",
-      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+      "หลับ", "ก้มหน้า", "ใช้โทรศัพท์", "สงสัยใช้โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
     ]);
     for (const h of latestExportData.history) {
       const summary = h.summary || {};
@@ -934,6 +1018,8 @@ function buildCSV(data) {
         toWholePeople(summary.attentive),
         toWholePeople(summary.sleeping),
         toWholePeople(summary.looking_down),
+        toWholePeople(summary.phone_use),
+        toWholePeople(summary.phone_suspected),
         toWholePeople(summary.hand_raised),
         toWholePeople(summary.standing),
         toWholePeople(summary.unknown),
@@ -964,6 +1050,8 @@ function buildExcel(data) {
     ["ตั้งใจเรียน (คน)", data.behavior_attentive],
     ["หลับ (คน)", data.behavior_sleeping],
     ["ก้มหน้า (คน)", data.behavior_looking_down],
+    ["ใช้โทรศัพท์ (คน)", data.behavior_phone_use],
+    ["สงสัยใช้โทรศัพท์ (คน)", data.behavior_phone_suspected],
     ["ยกมือ (คน)", data.behavior_hand_raised],
     ["ยืน/ลุก (คน)", data.behavior_standing],
     ["ไม่ชัดเจน (คน)", data.behavior_unknown],
@@ -978,7 +1066,7 @@ function buildExcel(data) {
     rows.push(["สรุปตามช่วงเวลา"]);
     rows.push([
       "ช่วงในคลิป", "คนเฉลี่ย", "ความตั้งใจ (%)", "ตั้งใจเรียน",
-      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+      "หลับ", "ก้มหน้า", "ใช้โทรศัพท์", "สงสัยใช้โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
     ]);
     for (const period of latestExportData.periods) {
       const summary = period.summary || {};
@@ -989,6 +1077,8 @@ function buildExcel(data) {
         toWholePeople(summary.attentive),
         toWholePeople(summary.sleeping),
         toWholePeople(summary.looking_down),
+        toWholePeople(summary.phone_use),
+        toWholePeople(summary.phone_suspected),
         toWholePeople(summary.hand_raised),
         toWholePeople(summary.standing),
         toWholePeople(summary.unknown),
@@ -1006,7 +1096,7 @@ function buildExcel(data) {
     rows.push([]);
     rows.push([
       "เวลา", "ความตั้งใจ (%)", "จำนวนคน", "ตั้งใจเรียน",
-      "หลับ", "ก้มหน้า", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
+      "หลับ", "ก้มหน้า", "ใช้โทรศัพท์", "สงสัยใช้โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน",
     ]);
     for (const h of latestExportData.history) {
       const summary = h.summary || {};
@@ -1017,6 +1107,8 @@ function buildExcel(data) {
         toWholePeople(summary.attentive),
         toWholePeople(summary.sleeping),
         toWholePeople(summary.looking_down),
+        toWholePeople(summary.phone_use),
+        toWholePeople(summary.phone_suspected),
         toWholePeople(summary.hand_raised),
         toWholePeople(summary.standing),
         toWholePeople(summary.unknown),
@@ -1062,6 +1154,7 @@ async function exportReport() {
   if (modal) modal.classList.remove("hidden");
   renderReportTimeline([]);
   renderTrackingReport(null);
+  renderBehaviorEvents(null);
   renderEvidenceReport(null);
 
   // ชื่อรอบ
@@ -1128,6 +1221,8 @@ async function exportReport() {
     set("reportAttentive", `${toWholePeople(reportBehavior.attentive)} คน`);
     set("reportSleeping", `${toWholePeople(reportBehavior.sleeping)} คน`);
     set("reportLookingDown", `${toWholePeople(reportBehavior.looking_down)} คน`);
+    set("reportPhoneUse", `${toWholePeople(reportBehavior.phone_use)} คน`);
+    set("reportPhoneSuspected", `${toWholePeople(reportBehavior.phone_suspected)} คน`);
     set("reportHandRaised", `${toWholePeople(reportBehavior.hand_raised)} คน`);
     set("reportStanding", `${toWholePeople(reportBehavior.standing)} คน`);
     set("reportUnknown", `${toWholePeople(reportBehavior.unknown)} คน`);
@@ -1137,12 +1232,14 @@ async function exportReport() {
     );
     renderReportTimeline(periods, latestExportData.period_seconds);
     renderTrackingReport(tracking);
+    renderBehaviorEvents(tracking);
     renderEvidenceReport(tracking);
   } catch (e) {
     console.error("Error fetching export data:", e);
     latestExportData = null;
     renderReportTimeline([]);
     renderTrackingReport(null);
+    renderBehaviorEvents(null);
     renderEvidenceReport(null);
     const recEl = document.getElementById("reportRecords");
     if (recEl) recEl.textContent = "ไม่สามารถโหลดข้อมูลได้";
@@ -1252,14 +1349,16 @@ function initCharts() {
     behaviorPieChart = new Chart(pieCtx, {
       type: "doughnut",
       data: {
-        labels: ["ตั้งใจเรียน", "หลับ", "ก้มหน้า/โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"],
+        labels: ["ตั้งใจเรียน", "หลับ", "ก้มหน้า", "ใช้โทรศัพท์", "สงสัยใช้โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"],
         datasets: [
           {
-            data: [0, 0, 0, 0, 0, 0],
+            data: [0, 0, 0, 0, 0, 0, 0, 0],
             backgroundColor: [
               "rgba(34, 197, 94, 0.8)",
               "rgba(239, 68, 68, 0.8)",
               "rgba(249, 115, 22, 0.8)",
+              "rgba(217, 119, 6, 0.85)",
+              "rgba(234, 179, 8, 0.8)",
               "rgba(14, 165, 233, 0.8)",
               "rgba(168, 85, 247, 0.8)",
               "rgba(107, 114, 128, 0.75)",
@@ -1310,6 +1409,8 @@ async function updateCharts() {
         toWholePeople(summary.attentive),
         toWholePeople(summary.sleeping),
         toWholePeople(summary.looking_down),
+        toWholePeople(summary.phone_use),
+        toWholePeople(summary.phone_suspected),
         toWholePeople(summary.hand_raised),
         toWholePeople(summary.standing),
         toWholePeople(summary.unknown),

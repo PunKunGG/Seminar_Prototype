@@ -153,6 +153,10 @@ class AppConfig:
     max_webcam_index: int
     max_video_upload_mb: int
     annotated_stream_fps: int
+    context_detection_enabled: bool
+    context_detection_interval: float
+    context_detection_confidence: float
+    context_detection_image_size: int
     long_video_threshold_seconds: int
     long_video_sample_interval_seconds: int
     long_video_sample_window_seconds: int
@@ -165,6 +169,9 @@ class AppConfig:
     tracking_db_write_interval: float
     realtime_stats_interval: float
     track_max_missing_seconds: float
+    track_position_enabled: bool
+    track_position_memory_seconds: float
+    track_position_max_distance: float
     supabase_url: str
     supabase_publishable_key: str
     supabase_auth_enabled: bool
@@ -286,6 +293,41 @@ def load_config(base_dir=None, environ=None):
                 ),
             ),
         ),
+        context_detection_enabled=env_flag(
+            "CLASSMOOD_CONTEXT_DETECTION_ENABLED",
+            True,
+            environment,
+        ),
+        context_detection_interval=max(
+            0.5,
+            env_float(
+                "CLASSMOOD_CONTEXT_DETECTION_INTERVAL",
+                5.0,
+                environment,
+            ),
+        ),
+        context_detection_confidence=min(
+            0.8,
+            max(
+                0.05,
+                env_float(
+                    "CLASSMOOD_CONTEXT_DETECTION_CONFIDENCE",
+                    0.20,
+                    environment,
+                ),
+            ),
+        ),
+        context_detection_image_size=min(
+            1280,
+            max(
+                640,
+                env_int(
+                    "CLASSMOOD_CONTEXT_DETECTION_IMAGE_SIZE",
+                    960,
+                    environment,
+                ),
+            ),
+        ),
         long_video_threshold_seconds=max(
             60,
             env_int(
@@ -316,7 +358,7 @@ def load_config(base_dir=None, environ=None):
             value.strip()
             for value in environment.get(
                 "CLASSMOOD_EVIDENCE_BEHAVIORS",
-                "sleeping,looking_down,hand_raised,standing",
+                "sleeping,looking_down,phone_use,phone_suspected,hand_raised,standing",
             ).split(",")
             if value.strip()
         ),
@@ -360,6 +402,30 @@ def load_config(base_dir=None, environ=None):
                 "CLASSMOOD_TRACK_MAX_MISSING_SECONDS",
                 4.0,
                 environment,
+            ),
+        ),
+        track_position_memory_seconds=max(
+            60.0,
+            env_float(
+                "CLASSMOOD_TRACK_POSITION_MEMORY_SECONDS",
+                6 * 60 * 60,
+                environment,
+            ),
+        ),
+        track_position_enabled=env_flag(
+            "CLASSMOOD_TRACK_POSITION_ENABLED",
+            True,
+            environment,
+        ),
+        track_position_max_distance=min(
+            2.0,
+            max(
+                0.1,
+                env_float(
+                    "CLASSMOOD_TRACK_POSITION_MAX_DISTANCE",
+                    0.45,
+                    environment,
+                ),
             ),
         ),
         supabase_url=supabase_url,

@@ -2,7 +2,8 @@
 🧠 Behavior Analyzer v2 - วิเคราะห์พฤติกรรมนักศึกษาจาก Pose Estimation
 แก้ไขให้แม่นขึ้นสำหรับห้องแล็บ:
   - Multi-signal scoring แทน single threshold
-  - ตรวจจับโทรศัพท์จาก wrist position
+  - แยกท่าก้มออกจากการตรวจพบโทรศัพท์จริง
+  - ใช้วัตถุโทรศัพท์และจอเป็นบริบทประกอบ pose
   - CLAHE preprocessing สำหรับแสงสว่างไม่สม่ำเสมอ
   - ใช้ yolov8s-pose (small) แทน nano ถ้ามี
   - Calibrate threshold สำหรับกล้องมุมสูงห้องแล็บ
@@ -17,8 +18,12 @@ import threading
 # โมเดล (lazy-loading)
 # ──────────────────────────────────────────────
 pose_model = None
+context_model = None
 pose_model_lock = threading.Lock()
 _MODEL_NAME = "yolov8s-pose.pt"   # small > nano (ดาวน์โหลดอัตโนมัติถ้ายังไม่มี)
+_CONTEXT_MODEL_NAME = "yolov8n.pt"
+_SCREEN_CLASS_IDS = frozenset({62, 63})
+_PHONE_CLASS_ID = 67
 
 def get_pose_model():
     global pose_model
@@ -41,6 +46,71 @@ def get_pose_model():
         else:
             pose_model = YOLO(_MODEL_NAME)   # ให้ ultralytics ดาวน์โหลดเอง
     return pose_model
+
+
+def get_context_model():
+    global context_model
+    if context_model is not None:
+        return context_model
+
+    base = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(os.path.join(base, os.pardir))
+    model_path = next(
+        (
+            path
+            for path in (
+                os.path.join(base, _CONTEXT_MODEL_NAME),
+                os.path.join(root, _CONTEXT_MODEL_NAME),
+            )
+            if os.path.exists(path)
+        ),
+        None,
+    )
+    if model_path is None:
+        return None
+    context_model = YOLO(model_path)
+    return context_model
+
+
+def detect_context_objects(
+    frame: np.ndarray,
+    *,
+    confidence=0.15,
+    image_size=960,
+) -> list:
+    """ตรวจเฉพาะจอคอม/แล็ปท็อป/โทรศัพท์จากโมเดล COCO ในเครื่อง"""
+    if frame is None:
+        return []
+
+    with pose_model_lock:
+        model = get_context_model()
+        if model is None:
+            return []
+        results = model(
+            frame,
+            verbose=False,
+            classes=[*_SCREEN_CLASS_IDS, _PHONE_CLASS_ID],
+            conf=max(0.05, min(0.8, float(confidence))),
+            iou=0.45,
+            imgsz=max(640, min(1280, int(image_size))),
+        )
+
+    if not results or results[0].boxes is None:
+        return []
+
+    boxes = results[0].boxes
+    return [
+        {
+            "class_id": int(class_id),
+            "confidence": round(float(score) * 100, 1),
+            "bbox": [round(float(value), 2) for value in bbox],
+        }
+        for bbox, class_id, score in zip(
+            boxes.xyxy.cpu().numpy(),
+            boxes.cls.cpu().numpy(),
+            boxes.conf.cpu().numpy(),
+        )
+    ]
 
 
 # ──────────────────────────────────────────────
@@ -78,7 +148,20 @@ def _get(kp, name):
     if idx is None or idx >= len(kp):
         return None
     x, y, c = kp[idx]
-    return np.array([float(x), float(y)]) if c >= KP_CONF_THRESHOLD else None
+    if c < KP_CONF_THRESHOLD or (float(x) == 0.0 and float(y) == 0.0):
+        return None
+    return np.array([float(x), float(y)])
+
+
+def _has_masked_wrist_candidates(kp):
+    masked = 0
+    for index in (_KP_IDX["left_wrist"], _KP_IDX["right_wrist"]):
+        if index >= len(kp) or len(kp[index]) < 3:
+            continue
+        x, y, confidence = kp[index]
+        if confidence >= 0.25 and float(x) == 0.0 and float(y) == 0.0:
+            masked += 1
+    return masked == 2
 
 def _midpoint(a, b):
     return (a + b) / 2 if (a is not None and b is not None) else None
@@ -125,6 +208,275 @@ def _standing_leg_votes(legs, shoulder_width):
     return votes
 
 
+def _is_hand_raised(kp):
+    """ต้องเห็นแขนยกเหนือใบหน้า ไม่ใช่แค่วางมือใกล้แก้มหรือคาง"""
+    nose = _get(kp, "nose")
+    left_eye = _get(kp, "left_eye")
+    right_eye = _get(kp, "right_eye")
+    face_center = nose if nose is not None else _midpoint(left_eye, right_eye)
+    if face_center is None:
+        return False
+
+    left_shoulder = _get(kp, "left_shoulder")
+    right_shoulder = _get(kp, "right_shoulder")
+    shoulder_width = _dist(left_shoulder, right_shoulder)
+    if shoulder_width is None:
+        return False
+
+    arms = (
+        (
+            _get(kp, "left_wrist"),
+            _get(kp, "left_elbow"),
+            left_shoulder,
+        ),
+        (
+            _get(kp, "right_wrist"),
+            _get(kp, "right_elbow"),
+            right_shoulder,
+        ),
+    )
+    for wrist, elbow, shoulder in arms:
+        if wrist is None or elbow is None or shoulder is None:
+            continue
+        wrist_above_face = wrist[1] < face_center[1] - (0.08 * shoulder_width)
+        elbow_supported = elbow[1] < shoulder[1] + (0.15 * shoulder_width)
+        forearm_points_up = wrist[1] < elbow[1] - (0.20 * shoulder_width)
+        if wrist_above_face and elbow_supported and forearm_points_up:
+            return True
+    return False
+
+
+def _is_sleeping_posture(kp):
+    """ต้องเห็นทั้งศีรษะต่ำและลำตัวพับ เพื่อลดการสับสนกับการมองจอ"""
+    nose = _get(kp, "nose")
+    left_shoulder = _get(kp, "left_shoulder")
+    right_shoulder = _get(kp, "right_shoulder")
+    left_hip = _get(kp, "left_hip")
+    right_hip = _get(kp, "right_hip")
+    shoulder_center = _midpoint(left_shoulder, right_shoulder)
+    hip_center = _midpoint(left_hip, right_hip)
+    shoulder_width = _dist(left_shoulder, right_shoulder)
+    if nose is None or shoulder_center is None or hip_center is None:
+        return False
+    if shoulder_width is None:
+        return False
+
+    head_ratio = (shoulder_center[1] - nose[1]) / shoulder_width
+    vertical_torso = (hip_center[1] - shoulder_center[1]) / shoulder_width
+    horizontal_torso = abs(hip_center[0] - shoulder_center[0]) / shoulder_width
+    torso_collapsed = vertical_torso < 0.35 or horizontal_torso > 0.85
+    return head_ratio <= 0.10 and torso_collapsed
+
+
+def _is_phone_hand_posture(kp):
+    """จับท่ามือบรรจบต่ำกว่าไหล่เป็นเพียงสัญญาณสงสัยใช้โทรศัพท์"""
+    left_shoulder = _get(kp, "left_shoulder")
+    right_shoulder = _get(kp, "right_shoulder")
+    left_elbow = _get(kp, "left_elbow")
+    right_elbow = _get(kp, "right_elbow")
+    left_wrist = _get(kp, "left_wrist")
+    right_wrist = _get(kp, "right_wrist")
+    shoulder_center = _midpoint(left_shoulder, right_shoulder)
+    wrist_center = _midpoint(left_wrist, right_wrist)
+    shoulder_width = _dist(left_shoulder, right_shoulder)
+    wrist_distance = _dist(left_wrist, right_wrist)
+    elbow_distance = _dist(left_elbow, right_elbow)
+    if (
+        shoulder_center is None
+        or wrist_center is None
+        or shoulder_width is None
+        or wrist_distance is None
+        or elbow_distance is None
+    ):
+        return False
+
+    wrists_close = wrist_distance <= shoulder_width * 0.85
+    hands_below_shoulders = (
+        wrist_center[1] >= shoulder_center[1] + (shoulder_width * 0.35)
+    )
+    forearms_converge = (
+        elbow_distance >= wrist_distance + (shoulder_width * 0.15)
+    )
+    return wrists_close and hands_below_shoulders and forearms_converge
+
+
+def _center_inside_expanded(container, item, margin_x, margin_y):
+    if not container or not item:
+        return False
+    x1, y1, x2, y2 = (float(value) for value in container)
+    item_x1, item_y1, item_x2, item_y2 = (
+        float(value) for value in item
+    )
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    center_x = (item_x1 + item_x2) / 2
+    center_y = (item_y1 + item_y2) / 2
+    return (
+        x1 - (width * margin_x) <= center_x <= x2 + (width * margin_x)
+        and y1 - (height * margin_y)
+        <= center_y
+        <= y2 + (height * margin_y)
+    )
+
+
+def _bbox_center_distance_ratio(left, right):
+    left_x1, left_y1, left_x2, left_y2 = (float(value) for value in left)
+    right_x1, right_y1, right_x2, right_y2 = (
+        float(value) for value in right
+    )
+    left_center = ((left_x1 + left_x2) / 2, (left_y1 + left_y2) / 2)
+    right_center = ((right_x1 + right_x2) / 2, (right_y1 + right_y2) / 2)
+    scale = max(1.0, left_x2 - left_x1, left_y2 - left_y1)
+    return float(np.linalg.norm(np.subtract(left_center, right_center))) / scale
+
+
+def _person_contexts(person_bboxes, context_objects):
+    contexts = [
+        {"phone_confidence": 0.0, "screen_detected": False}
+        for _ in person_bboxes
+    ]
+    for item in context_objects or []:
+        object_bbox = item.get("bbox")
+        class_id = item.get("class_id")
+        if not object_bbox:
+            continue
+
+        if class_id in _SCREEN_CLASS_IDS:
+            for index, person_bbox in enumerate(person_bboxes):
+                if not person_bbox:
+                    continue
+                _, person_y1, _, person_y2 = (
+                    float(value) for value in person_bbox
+                )
+                _, object_y1, _, object_y2 = (
+                    float(value) for value in object_bbox
+                )
+                object_center_y = (object_y1 + object_y2) / 2
+                screen_is_near_gaze = object_center_y <= (
+                    person_y1 + ((person_y2 - person_y1) * 0.40)
+                )
+                if _center_inside_expanded(
+                    person_bbox,
+                    object_bbox,
+                    0.90,
+                    0.30,
+                ) and screen_is_near_gaze:
+                    contexts[index]["screen_detected"] = True
+            continue
+
+        if class_id != _PHONE_CLASS_ID:
+            continue
+        candidates = [
+            (
+                _bbox_center_distance_ratio(person_bbox, object_bbox),
+                index,
+            )
+            for index, person_bbox in enumerate(person_bboxes)
+            if _center_inside_expanded(
+                person_bbox,
+                object_bbox,
+                0.25,
+                0.20,
+            )
+        ]
+        if not candidates:
+            continue
+        _, person_index = min(candidates)
+        contexts[person_index]["phone_confidence"] = max(
+            contexts[person_index]["phone_confidence"],
+            float(item.get("confidence") or 0),
+        )
+    return contexts
+
+
+def _detect_phones_in_suspected_person_crops(
+    frame,
+    keypoints_data,
+    person_bboxes,
+    person_contexts,
+    *,
+    confidence=0.18,
+    image_size=640,
+):
+    """Recheck likely phone users in tighter crops when full-frame YOLO misses it."""
+    if frame is None:
+        return []
+
+    frame_height, frame_width = frame.shape[:2]
+    crop_candidates = []
+    for index, (keypoints, person_bbox, context) in enumerate(
+        zip(keypoints_data, person_bboxes, person_contexts)
+    ):
+        if (
+            not person_bbox
+            or context.get("phone_confidence", 0) > 0
+            or not _is_phone_hand_posture(keypoints)
+        ):
+            continue
+
+        x1, y1, x2, y2 = (float(value) for value in person_bbox)
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        crop_x1 = max(0, int(round(x1 - (width * 0.15))))
+        crop_y1 = max(0, int(round(y1 - (height * 0.15))))
+        crop_x2 = min(frame_width, int(round(x2 + (width * 0.15))))
+        crop_y2 = min(frame_height, int(round(y2 + (height * 0.15))))
+        if crop_x2 - crop_x1 < 16 or crop_y2 - crop_y1 < 16:
+            continue
+        crop_candidates.append(
+            {
+                "image": frame[crop_y1:crop_y2, crop_x1:crop_x2],
+                "origin": (crop_x1, crop_y1),
+                "person_index": index,
+            }
+        )
+
+    if not crop_candidates:
+        return []
+
+    with pose_model_lock:
+        model = get_context_model()
+        if model is None:
+            return []
+        results = model(
+            [candidate["image"] for candidate in crop_candidates],
+            verbose=False,
+            classes=[_PHONE_CLASS_ID],
+            conf=max(0.05, min(0.8, float(confidence))),
+            iou=0.45,
+            imgsz=max(480, min(960, int(image_size))),
+        )
+
+    detections = []
+    for candidate, result in zip(crop_candidates, results or []):
+        if result.boxes is None or len(result.boxes) == 0:
+            continue
+        boxes = result.boxes
+        rows = boxes.xyxy.cpu().numpy()
+        scores = boxes.conf.cpu().numpy()
+        best_index = int(np.argmax(scores))
+        offset_x, offset_y = candidate["origin"]
+        local_bbox = rows[best_index]
+        detections.append(
+            {
+                "class_id": _PHONE_CLASS_ID,
+                "confidence": round(float(scores[best_index]) * 100, 1),
+                "bbox": [
+                    round(float(local_bbox[0]) + offset_x, 2),
+                    round(float(local_bbox[1]) + offset_y, 2),
+                    round(float(local_bbox[2]) + offset_x, 2),
+                    round(float(local_bbox[3]) + offset_y, 2),
+                ],
+                "source": "person_crop",
+            }
+        )
+    return detections
+
+
+def _person_context(person_bbox, context_objects):
+    return _person_contexts([person_bbox], context_objects)[0]
+
+
 # ──────────────────────────────────────────────
 # Multi-signal scoring
 # ──────────────────────────────────────────────
@@ -137,24 +489,20 @@ def _score_behavior(kp) -> dict:
       S2  Trunk uprightness      (ไหล่ vs สะโพก)
       S3  Eye separation ratio   (หน้าตรง vs หันข้าง)
       S4  Ear symmetry           (เห็นสองหู vs หูเดียว)
-      S5  Wrist-to-face proximity (ถือโทรศัพท์)
-      S6  Elbow raised           (วางข้อศอกสูง)
-      S7  Wrist above shoulder   (ยกมือ)
-      S8  Full-body verticality   (ยืน/ลุก)
+      S5  Confirmed phone object (เพิ่มภายหลังจาก object detector)
+      S6  Wrist above face + supported elbow (ยกมือ)
+      S7  Full-body verticality   (ยืน/ลุก)
     """
     scores = {"attentive": 0.0, "looking_down": 0.0,
-              "sleeping": 0.0, "hand_raised": 0.0,
-              "standing": 0.0}
+              "phone_use": 0.0, "phone_suspected": 0.0,
+              "sleeping": 0.0,
+              "hand_raised": 0.0, "standing": 0.0}
 
     nose           = _get(kp, "nose")
     left_eye       = _get(kp, "left_eye")
     right_eye      = _get(kp, "right_eye")
     left_shoulder  = _get(kp, "left_shoulder")
     right_shoulder = _get(kp, "right_shoulder")
-    left_wrist     = _get(kp, "left_wrist")
-    right_wrist    = _get(kp, "right_wrist")
-    left_elbow     = _get(kp, "left_elbow")
-    right_elbow    = _get(kp, "right_elbow")
     left_hip       = _get(kp, "left_hip")
     right_hip      = _get(kp, "right_hip")
     left_knee      = _get(kp, "left_knee")
@@ -177,21 +525,19 @@ def _score_behavior(kp) -> dict:
             scores["attentive"]    += 2.5
         elif head_ratio > 0.30:                     # นั่งตรงพอสมควร
             scores["attentive"]    += 1.5
-            scores["looking_down"] += 0.5
+            scores["looking_down"] += 0.25
         elif head_ratio > 0.10:                     # ก้มเล็กน้อย
-            scores["looking_down"] += 2.5
-        elif head_ratio > -0.10:                    # ก้มมาก
+            scores["attentive"]    += 0.75
             scores["looking_down"] += 1.5
-            scores["sleeping"]     += 1.5
-        else:                                       # หัวต่ำมาก / หลับ
-            scores["sleeping"]     += 3.0
+        elif head_ratio > -0.10:                    # ก้มมาก
+            scores["looking_down"] += 2.0
+        else:                                       # หัวต่ำมาก แต่ยังไม่สรุปว่าหลับ
+            scores["looking_down"] += 2.5
 
     # ── S2: Trunk uprightness ────────────────────────────────────
     if shoulder_center is not None and hip_center is not None:
         trunk_dy = shoulder_center[1] - hip_center[1]  # ลบ = ไหล่สูงกว่าสะโพก (ปกติ)
-        if trunk_dy > 5:          # ไหล่ต่ำกว่าสะโพก = โย้ตัวมาก / หลับ
-            scores["sleeping"]  += 2.0
-        elif trunk_dy < -20:      # ตั้งตรงดี
+        if trunk_dy < -20:        # ตั้งตรงดี
             scores["attentive"] += 1.0
 
         torso_ratio = (hip_center[1] - shoulder_center[1]) / shoulder_width
@@ -226,36 +572,16 @@ def _score_behavior(kp) -> dict:
     if both_ears: scores["attentive"] += 1.0
     elif one_ear: scores["attentive"] += 0.25
 
-    # ── S5: Wrist-to-face proximity (phone detection) ────────────
-    face_center = nose if nose is not None else _midpoint(left_eye, right_eye)
-    if face_center is not None:
-        for wrist, shoulder in [(left_wrist, left_shoulder),
-                                (right_wrist, right_shoulder)]:
-            if wrist is not None:
-                raised = (
-                    shoulder is not None
-                    and wrist[1] < shoulder[1] - (0.25 * shoulder_width)
-                )
-                if raised:
-                    continue
-                wr = (_dist(wrist, face_center) or 9999) / shoulder_width
-                if   wr < 0.6:   # wrist ใกล้หน้ามาก = ถือโทรศัพท์
-                    scores["looking_down"] += 2.0
-                    scores["attentive"]    -= 0.5
-                elif wr < 1.0:
-                    scores["looking_down"] += 0.5
+    # ── S5/S6: Object context and explicit hand raise ────────────
+    if _is_hand_raised(kp):
+        scores["hand_raised"] += 4.0
+        scores["attentive"] += 0.75
 
-    # ── S6/S7: Hand raised ───────────────────────────────────────
-    for wrist, elbow, shoulder in [(left_wrist, left_elbow, left_shoulder),
-                                   (right_wrist, right_elbow, right_shoulder)]:
-        if wrist is not None and shoulder is not None:
-            if wrist[1] < shoulder[1] - (0.35 * shoulder_width):
-                scores["hand_raised"] += 3.0
-                scores["attentive"]   += 0.75
-                continue
-        if elbow is not None and shoulder is not None:
-            if shoulder[1] - elbow[1] > 10:   # ข้อศอกสูงกว่าไหล่
-                scores["hand_raised"] += 1.0
+    if _is_sleeping_posture(kp):
+        scores["sleeping"] += 4.0
+
+    if _is_phone_hand_posture(kp):
+        scores["phone_suspected"] += 3.5
 
     # คลิปค่าลบออก
     for k in scores:
@@ -264,7 +590,12 @@ def _score_behavior(kp) -> dict:
     return scores
 
 
-def analyze_pose(keypoints) -> dict:
+def analyze_pose(
+    keypoints,
+    *,
+    phone_confidence=0.0,
+    screen_detected=False,
+) -> dict:
     """
     วิเคราะห์ท่าทางจาก keypoints ด้วย multi-signal scoring
 
@@ -274,9 +605,34 @@ def analyze_pose(keypoints) -> dict:
         return {"behavior": "unknown", "confidence": 0, "details": {}}
 
     scores = _score_behavior(keypoints)
+    phone_confidence = max(0.0, min(100.0, float(phone_confidence or 0)))
+    phone_hand_posture = _is_phone_hand_posture(keypoints)
+    ambiguous_hand_activity = (
+        _has_masked_wrist_candidates(keypoints)
+        and scores.get("looking_down", 0) >= 1.0
+    )
+    if phone_confidence > 0:
+        scores["phone_use"] = max(4.0, phone_confidence / 20.0)
+    elif (
+        screen_detected
+        and not ambiguous_hand_activity
+        and not phone_hand_posture
+        and scores.get("looking_down", 0) > 0
+    ):
+        scores["attentive"] += 2.0
+        scores["looking_down"] = max(
+            0.0,
+            scores["looking_down"] - 1.5,
+        )
     total  = sum(scores.values())
     visible_kp = int(sum(
-        1 for kp in keypoints if len(kp) >= 3 and kp[2] >= KP_CONF_THRESHOLD
+        1
+        for kp in keypoints
+        if (
+            len(kp) >= 3
+            and kp[2] >= KP_CONF_THRESHOLD
+            and not (float(kp[0]) == 0.0 and float(kp[1]) == 0.0)
+        )
     ))
 
     def _unknown():
@@ -286,7 +642,10 @@ def analyze_pose(keypoints) -> dict:
                     "visible_keypoints": visible_kp,
                 }}
 
-    if visible_kp < 6:
+    if ambiguous_hand_activity and phone_confidence <= 0:
+        return _unknown()
+
+    if visible_kp < 6 and phone_confidence <= 0:
         return _unknown()
 
     if total < 1.0:
@@ -294,7 +653,11 @@ def analyze_pose(keypoints) -> dict:
         return _unknown()
 
     priority_best = None
-    if scores.get("hand_raised", 0) >= 3.0:
+    if phone_confidence > 0:
+        priority_best = "phone_use"
+    elif phone_hand_posture:
+        priority_best = "phone_suspected"
+    elif _is_hand_raised(keypoints):
         priority_best = "hand_raised"
     elif scores.get("standing", 0) >= 3.0:
         priority_best = "standing"
@@ -303,14 +666,19 @@ def analyze_pose(keypoints) -> dict:
     best_score = scores[best]
     confidence = min(97, int(round((best_score / total) * 100)))
     if priority_best:
-        confidence = max(65, confidence)
+        minimum_confidence = 55 if best == "phone_suspected" else 65
+        confidence = max(minimum_confidence, confidence)
+    if best == "phone_use":
+        confidence = max(confidence, int(round(phone_confidence)))
+    elif best == "phone_suspected":
+        confidence = max(55, confidence)
 
     # ถ้าคะแนนชนะไม่ชัดเจน ให้เป็น unknown แทนการเดาเป็น attentive
     sorted_vals = sorted(scores.values(), reverse=True)
     margin = best_score - sorted_vals[1] if len(sorted_vals) > 1 else best_score
-    if priority_best is None and len(sorted_vals) > 1 and margin < 0.5 and best != "attentive":
+    if priority_best is None and len(sorted_vals) > 1 and margin < 0.5:
         return _unknown()
-    if best == "attentive" and (best_score < 2.5 or confidence < 45):
+    if best == "attentive" and (best_score < 2.0 or confidence < 40):
         return _unknown()
 
     return {
@@ -319,6 +687,10 @@ def analyze_pose(keypoints) -> dict:
         "details": {
             "scores":           {k: round(v, 2) for k, v in scores.items()},
             "visible_keypoints": visible_kp,
+            "phone_detected": phone_confidence > 0,
+            "phone_confidence": round(phone_confidence, 1),
+            "phone_hand_posture": phone_hand_posture,
+            "screen_detected": bool(screen_detected),
         },
     }
 
@@ -326,7 +698,13 @@ def analyze_pose(keypoints) -> dict:
 # ──────────────────────────────────────────────
 # Frame-level analysis
 # ──────────────────────────────────────────────
-def analyze_frame(frame: np.ndarray) -> dict:
+def analyze_frame(
+    frame: np.ndarray,
+    context_objects=None,
+    *,
+    refine_phone_detection=False,
+    phone_detection_confidence=0.18,
+) -> dict:
     """
     วิเคราะห์ภาพทั้งเฟรม พร้อม preprocessing และ annotated output
 
@@ -335,6 +713,7 @@ def analyze_frame(frame: np.ndarray) -> dict:
     Returns:
         dict: total_people, behaviors, summary, attention_rate, annotated_frame
     """
+    context_objects = list(context_objects or [])
     processed = preprocess_frame(frame)
 
     with pose_model_lock:
@@ -351,7 +730,9 @@ def analyze_frame(frame: np.ndarray) -> dict:
         "total_people": 0,
         "behaviors": [],
         "summary": {"attentive": 0, "sleeping": 0,
-                    "looking_down": 0, "hand_raised": 0,
+                    "looking_down": 0, "phone_use": 0,
+                    "phone_suspected": 0,
+                    "hand_raised": 0,
                     "standing": 0, "unknown": 0},
         "attention_rate": 0,
         "annotated_frame": frame,
@@ -368,19 +749,41 @@ def analyze_frame(frame: np.ndarray) -> dict:
 
     behaviors      = []
     behavior_counts = {"attentive": 0, "sleeping": 0,
-                       "looking_down": 0, "hand_raised": 0,
+                       "looking_down": 0, "phone_use": 0,
+                       "phone_suspected": 0,
+                       "hand_raised": 0,
                        "standing": 0, "unknown": 0}
 
     box_rows = boxes.xyxy.cpu().numpy() if boxes is not None else []
     box_confidences = boxes.conf.cpu().numpy() if boxes is not None else []
 
+    person_bboxes = [
+        (
+            [round(float(value), 2) for value in box_rows[index]]
+            if index < len(box_rows)
+            else None
+        )
+        for index in range(len(keypoints_data))
+    ]
+    person_contexts = _person_contexts(person_bboxes, context_objects)
+    if refine_phone_detection:
+        context_objects.extend(
+            _detect_phones_in_suspected_person_crops(
+                frame,
+                keypoints_data,
+                person_bboxes,
+                person_contexts,
+                confidence=phone_detection_confidence,
+            )
+        )
+        person_contexts = _person_contexts(person_bboxes, context_objects)
+
     for index, kp in enumerate(keypoints_data):
-        analysis = analyze_pose(kp)
+        person_bbox = person_bboxes[index]
+        context = person_contexts[index]
+        analysis = analyze_pose(kp, **context)
         if index < len(box_rows):
-            analysis["bbox"] = [
-                round(float(value), 2)
-                for value in box_rows[index]
-            ]
+            analysis["bbox"] = person_bbox
         if index < len(box_confidences):
             analysis["detection_confidence"] = round(
                 float(box_confidences[index]) * 100,
@@ -402,6 +805,8 @@ def analyze_frame(frame: np.ndarray) -> dict:
         "attentive":    ( 50, 205,  50),  # เขียว
         "sleeping":     (  0,   0, 220),  # แดง
         "looking_down": (  0, 140, 255),  # ส้ม
+        "phone_use":    ( 30, 105, 210),  # ส้มเข้ม
+        "phone_suspected": ( 80, 150, 220),  # เหลืองเข้ม
         "hand_raised":  (235, 180,  20),  # ฟ้า
         "standing":     (170,  80, 210),  # ม่วง
         "unknown":      (180, 180, 180),  # เทา
@@ -425,25 +830,45 @@ def analyze_frame(frame: np.ndarray) -> dict:
             cv2.putText(annotated_frame, text, (x1 + 2, label_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
+    for item in context_objects or []:
+        if item.get("class_id") != _PHONE_CLASS_ID or not item.get("bbox"):
+            continue
+        x1, y1, x2, y2 = map(int, item["bbox"])
+        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (30, 105, 210), 2)
+        cv2.putText(
+            annotated_frame,
+            f"Phone {item.get('confidence', 0):.0f}%",
+            (x1, max(16, y1 - 4)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (30, 105, 210),
+            1,
+        )
+
     # ── HUD bar ──────────────────────────────────────────────────
     h, w = annotated_frame.shape[:2]
     hud = (f"Attention {attention_rate}%  |  "
            f"Students: {total_people}  |  "
            f"Sleeping: {behavior_counts['sleeping']}  |  "
-           f"Phone/Down: {behavior_counts['looking_down']}  |  "
+           f"Down: {behavior_counts['looking_down']}  |  "
+           f"Phone: {behavior_counts['phone_use']}  |  "
+           f"Phone?: {behavior_counts['phone_suspected']}  |  "
            f"Raised: {behavior_counts['hand_raised']}  |  "
            f"Standing: {behavior_counts['standing']}")
     cv2.rectangle(annotated_frame, (0, h - 32), (w, h), (30, 30, 30), cv2.FILLED)
     cv2.putText(annotated_frame, hud, (8, h - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
 
-    return {
+    analysis_result = {
         "total_people":    total_people,
         "behaviors":       behaviors,
         "summary":         behavior_counts,
         "attention_rate":  attention_rate,
         "annotated_frame": annotated_frame,
     }
+    if refine_phone_detection:
+        analysis_result["_context_objects"] = context_objects
+    return analysis_result
 
 
 # ──────────────────────────────────────────────
@@ -453,7 +878,9 @@ def get_behavior_label_th(behavior: str) -> str:
     return {
         "attentive":    "ตั้งใจเรียน",
         "sleeping":     "หลับ",
-        "looking_down": "ก้มหน้า/โทรศัพท์",
+        "looking_down": "ก้มหน้า",
+        "phone_use":    "ใช้โทรศัพท์",
+        "phone_suspected": "สงสัยใช้โทรศัพท์",
         "hand_raised":  "ยกมือ",
         "standing":     "ยืน/ลุก",
         "unknown":      "ไม่ทราบ",
@@ -464,7 +891,9 @@ def get_behavior_label_en(behavior: str) -> str:
     return {
         "attentive":    "Attentive",
         "sleeping":     "Sleeping",
-        "looking_down": "Phone/Down",
+        "looking_down": "Looking Down",
+        "phone_use":    "Phone Use",
+        "phone_suspected": "Phone Suspected",
         "hand_raised":  "Hand Raised",
         "standing":     "Standing",
         "unknown":      "Unknown",

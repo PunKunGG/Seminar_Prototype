@@ -81,6 +81,7 @@ class AppConfigTests(unittest.TestCase):
                 "CLASSMOOD_CONTEXT_DETECTION_INTERVAL": "0.1",
                 "CLASSMOOD_CONTEXT_DETECTION_CONFIDENCE": "9",
                 "CLASSMOOD_CONTEXT_DETECTION_IMAGE_SIZE": "100",
+                "CLASSMOOD_REALTIME_STATS_INTERVAL": "0.1",
                 "CLASSMOOD_LONG_VIDEO_SAMPLE_INTERVAL_SECONDS": "30",
                 "CLASSMOOD_LONG_VIDEO_SAMPLE_WINDOW_SECONDS": "45",
                 "CLASSMOOD_LONG_VIDEO_SAMPLE_FPS": "20",
@@ -100,6 +101,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(config.context_detection_interval, 0.5)
             self.assertEqual(config.context_detection_confidence, 0.8)
             self.assertEqual(config.context_detection_image_size, 640)
+            self.assertEqual(config.realtime_stats_interval, 1.0)
             self.assertEqual(config.long_video_sample_interval_seconds, 30)
             self.assertEqual(config.long_video_sample_window_seconds, 30)
             self.assertEqual(config.long_video_sample_fps, 5.0)
@@ -123,6 +125,13 @@ class AppConfigTests(unittest.TestCase):
             )
             self.assertFalse(config.supabase_auth_enabled)
             self.assertFalse(config.session_cookie_secure)
+
+    def test_default_report_and_sample_windows_support_overview(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = load_config(temp_dir, {})
+
+        self.assertEqual(config.realtime_stats_interval, 10.0)
+        self.assertEqual(config.long_video_sample_window_seconds, 15)
 
     def test_supabase_auth_requires_a_complete_valid_pair(self):
         with tempfile.TemporaryDirectory() as temp_dir:

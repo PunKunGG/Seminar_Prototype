@@ -16,7 +16,9 @@ from behavior_analyzer import (
     _person_context,
     _person_contexts,
     analyze_pose,
+    get_behavior_measurement_criteria,
 )
+from person_tracking import DEFAULT_TRANSITION_SECONDS
 
 
 def keypoints():
@@ -48,6 +50,21 @@ def keypoints():
 
 
 class PoseBehaviorTests(unittest.TestCase):
+    def test_measurement_criteria_cover_every_reported_behavior(self):
+        criteria = get_behavior_measurement_criteria(
+            DEFAULT_TRANSITION_SECONDS,
+        )
+
+        self.assertEqual(
+            {item["behavior"] for item in criteria},
+            set(DEFAULT_TRANSITION_SECONDS),
+        )
+        sleeping = next(
+            item for item in criteria if item["behavior"] == "sleeping"
+        )
+        self.assertIn("ลืมตา/หลับตา", sleeping["limitation"])
+        self.assertEqual(sleeping["confirmation_seconds"], 8.0)
+
     def test_hands_near_face_are_not_treated_as_raised(self):
         result = analyze_pose(keypoints())
 

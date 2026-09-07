@@ -79,6 +79,9 @@ function generatePDF(labId) {
   const behaviorEventsWrapper = document.getElementById(
     "reportBehaviorEventsTableWrapper",
   );
+  const methodologyWrapper = document.getElementById(
+    "reportMethodologyTableWrapper",
+  );
   const savedStyles = {
     maxHeight: reportContent.style.maxHeight,
     overflow: reportContent.style.overflow,
@@ -89,6 +92,7 @@ function generatePDF(labId) {
     timelineOverflow: timelineWrapper?.style.overflow || "",
     trackingOverflow: trackingWrapper?.style.overflow || "",
     behaviorEventsOverflow: behaviorEventsWrapper?.style.overflow || "",
+    methodologyOverflow: methodologyWrapper?.style.overflow || "",
   };
   const restoreReportLayout = () => {
     reportContent.style.maxHeight = savedStyles.maxHeight;
@@ -102,6 +106,9 @@ function generatePDF(labId) {
     if (behaviorEventsWrapper) {
       behaviorEventsWrapper.style.overflow = savedStyles.behaviorEventsOverflow;
     }
+    if (methodologyWrapper) {
+      methodologyWrapper.style.overflow = savedStyles.methodologyOverflow;
+    }
   };
 
   reportContent.style.maxHeight = "none";
@@ -113,6 +120,7 @@ function generatePDF(labId) {
   if (timelineWrapper) timelineWrapper.style.overflow = "visible";
   if (trackingWrapper) trackingWrapper.style.overflow = "visible";
   if (behaviorEventsWrapper) behaviorEventsWrapper.style.overflow = "visible";
+  if (methodologyWrapper) methodologyWrapper.style.overflow = "visible";
 
   waitForReportImages(reportContent)
     .then(() => {

@@ -21,13 +21,21 @@ from auth_service import (
     load_or_create_session_secret,
 )
 from behavior_analyzer import (
+    PERSON_DETECTION_CONFIDENCE,
+    POSE_IMAGE_SIZE,
+    KP_CONF_THRESHOLD,
     analyze_frame,
     detect_context_objects,
+    get_behavior_measurement_criteria,
     get_behavior_label_en,
     get_behavior_label_th,
 )
 from evidence_store import EvidenceStore
-from person_tracking import BEHAVIOR_KEYS, SessionTracker
+from person_tracking import (
+    BEHAVIOR_KEYS,
+    DEFAULT_TRANSITION_SECONDS,
+    SessionTracker,
+)
 from session_database import SessionDatabase
 from video_sampling import (
     aggregate_analyses,
@@ -450,6 +458,42 @@ def _new_session_tracker(metadata):
         position_memory_seconds=CONFIG.track_position_memory_seconds,
         max_position_distance=CONFIG.track_position_max_distance,
     )
+
+
+def _analysis_methodology():
+    return {
+        "pose_model": "YOLOv8 Pose (17 keypoints)",
+        "pose_image_size": POSE_IMAGE_SIZE,
+        "person_detection_confidence": PERSON_DETECTION_CONFIDENCE,
+        "keypoint_confidence": KP_CONF_THRESHOLD,
+        "context_model": "YOLOv8 COCO object detection",
+        "context_detection_interval_seconds": (
+            CONFIG.context_detection_interval
+        ),
+        "context_detection_confidence": (
+            CONFIG.context_detection_confidence
+        ),
+        "realtime_summary_interval_seconds": CONFIG.realtime_stats_interval,
+        "attention_formula": (
+            "(เวลาที่จัดเป็นตั้งใจเรียน + เวลาที่ยกมือ) / "
+            "เวลาที่วิเคราะห์บุคคลทั้งหมด x 100"
+        ),
+        "long_video_sampling": {
+            "threshold_seconds": CONFIG.long_video_threshold_seconds,
+            "interval_seconds": CONFIG.long_video_sample_interval_seconds,
+            "window_seconds": CONFIG.long_video_sample_window_seconds,
+            "sample_fps": CONFIG.long_video_sample_fps,
+        },
+        "criteria": get_behavior_measurement_criteria(
+            DEFAULT_TRANSITION_SECONDS,
+        ),
+        "limitations": [
+            "ไม่ใช้การตรวจใบหน้า การระบุตัวบุคคล เสียง หรือเนื้อหาบนหน้าจอ",
+            "ไม่ตรวจสถานะลืมตาหรือหลับตา การหลับอนุมานจากศีรษะและลำตัวเท่านั้น",
+            "ค่า confidence เป็นสัดส่วนคะแนนจากกฎ ไม่ใช่ความน่าจะเป็นที่ผ่านการสอบเทียบ",
+            "มุมกล้อง แสง ความละเอียด การบังกัน และตำแหน่งโต๊ะมีผลต่อผลลัพธ์",
+        ],
+    }
 
 
 def _get_session_tracker(lab_id, cam_id):
@@ -1551,6 +1595,7 @@ def export_lab_data(lab_id):
         "period_seconds": 600 if periods else None,
         "periods": periods,
         "tracking": tracking_report,
+        "analysis_methodology": _analysis_methodology(),
         "history": history,
         "activities": activities
     })

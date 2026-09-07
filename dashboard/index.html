@@ -599,6 +599,12 @@
                 <p class="text-sm text-blue-600" id="reportSessionContext">
                   วิชา: - | ห้อง: -
                 </p>
+                <p class="text-sm text-blue-600" id="reportRecordingPeriod">
+                  ช่วงเวลาคาบ: -
+                </p>
+                <p class="text-sm text-blue-600" id="reportAnalysisMode">
+                  รูปแบบการวิเคราะห์: -
+                </p>
               </div>
               <div class="bg-green-50 p-4 rounded-lg">
                 <h4 class="font-semibold text-green-800">สถิติการใช้งาน</h4>
@@ -687,6 +693,45 @@
               </div>
             </div>
 
+            <div id="reportMethodologySection">
+              <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
+                <h4 class="font-semibold text-gray-800">
+                  เกณฑ์การวัดพฤติกรรมและข้อจำกัด
+                </h4>
+                <span id="reportMethodologyCaption" class="text-xs text-gray-500">
+                  อ้างอิงจากค่าที่ระบบใช้ในรอบนี้
+                </span>
+              </div>
+              <p id="reportAttentionFormula" class="mb-3 text-sm text-gray-600">
+                สูตรอัตราความตั้งใจ: -
+              </p>
+              <div
+                id="reportMethodologyTableWrapper"
+                class="overflow-x-auto border border-gray-200 rounded-lg"
+              >
+                <table class="w-full min-w-[980px] text-xs text-left">
+                  <thead class="bg-gray-100 text-gray-700">
+                    <tr>
+                      <th class="px-3 py-2 font-semibold">พฤติกรรม</th>
+                      <th class="px-3 py-2 font-semibold">สิ่งที่วัดและเกณฑ์ตัดสิน</th>
+                      <th class="px-3 py-2 font-semibold text-right">
+                        ยืนยันก่อนเปลี่ยนสถานะ
+                      </th>
+                      <th class="px-3 py-2 font-semibold">ข้อจำกัดเฉพาะ</th>
+                    </tr>
+                  </thead>
+                  <tbody
+                    id="reportMethodologyRows"
+                    class="divide-y divide-gray-100"
+                  ></tbody>
+                </table>
+              </div>
+              <ul
+                id="reportMethodologyLimitations"
+                class="mt-3 space-y-1 text-xs text-gray-600 list-disc pl-5"
+              ></ul>
+            </div>
+
             <div id="reportTimelineSection" class="hidden">
               <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
                 <h4 class="font-semibold text-gray-800">สรุปตามช่วงเวลา</h4>
@@ -722,31 +767,30 @@
             <div id="reportTrackingSection" class="hidden">
               <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
                 <h4 class="font-semibold text-gray-800">
-                  สรุปตามตำแหน่งและช่วงเวลา
+                  สรุปตามตำแหน่ง
                 </h4>
                 <span class="text-xs text-gray-500">
-                  Position ID แบ่งช่วงละ 1 ชั่วโมง
+                  จำนวนครั้ง / ระยะเวลาที่วิเคราะห์ได้ตลอดคาบ
                 </span>
               </div>
               <div
                 id="reportTrackingTableWrapper"
                 class="overflow-x-auto border border-gray-200 rounded-lg"
               >
-                <table class="w-full min-w-[1240px] text-xs text-left">
+                <table class="w-full min-w-[1200px] text-xs text-left">
                   <thead class="bg-gray-100 text-gray-700">
                     <tr>
-                      <th class="px-3 py-2 font-semibold">ช่วงเวลา</th>
                       <th class="px-3 py-2 font-semibold">ตำแหน่ง</th>
-                      <th class="px-3 py-2 font-semibold text-right">เวลาที่ตรวจพบ</th>
+                      <th class="px-3 py-2 font-semibold text-right">เวลาวิเคราะห์รวม</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (%)</th>
-                      <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (ครั้ง)</th>
-                      <th class="px-3 py-2 font-semibold text-right">หลับ (ครั้ง)</th>
-                      <th class="px-3 py-2 font-semibold text-right">ก้มหน้า (ครั้ง)</th>
-                      <th class="px-3 py-2 font-semibold text-right">โทรศัพท์ (ครั้ง)</th>
-                      <th class="px-3 py-2 font-semibold text-right">สงสัยโทรศัพท์ (ครั้ง)</th>
-                      <th class="px-3 py-2 font-semibold text-right">ยกมือ (ครั้ง)</th>
-                      <th class="px-3 py-2 font-semibold text-right">ยืน (ครั้ง)</th>
-                      <th class="px-3 py-2 font-semibold text-right">ไม่ชัดเจน (ครั้ง)</th>
+                      <th class="px-3 py-2 font-semibold text-right">ตั้งใจ</th>
+                      <th class="px-3 py-2 font-semibold text-right">หลับ</th>
+                      <th class="px-3 py-2 font-semibold text-right">ก้มหน้า</th>
+                      <th class="px-3 py-2 font-semibold text-right">โทรศัพท์</th>
+                      <th class="px-3 py-2 font-semibold text-right">สงสัยโทรศัพท์</th>
+                      <th class="px-3 py-2 font-semibold text-right">ยกมือ</th>
+                      <th class="px-3 py-2 font-semibold text-right">ยืน</th>
+                      <th class="px-3 py-2 font-semibold text-right">ไม่ชัดเจน</th>
                     </tr>
                   </thead>
                   <tbody

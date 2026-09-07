@@ -129,6 +129,12 @@ def preprocess_frame(frame: np.ndarray) -> np.ndarray:
 # Keypoint helpers
 # ──────────────────────────────────────────────
 KP_CONF_THRESHOLD = 0.40   # keypoint confidence ต่ำกว่านี้ถือว่าไม่น่าเชื่อถือ
+PERSON_DETECTION_CONFIDENCE = 0.35
+POSE_IMAGE_SIZE = 640
+MIN_VISIBLE_KEYPOINTS = 6
+MIN_SCORE_MARGIN = 0.5
+ATTENTIVE_MIN_SCORE = 2.0
+ATTENTIVE_MIN_CONFIDENCE = 40
 
 _KP_IDX = dict(
     nose=0,
@@ -645,7 +651,7 @@ def analyze_pose(
     if ambiguous_hand_activity and phone_confidence <= 0:
         return _unknown()
 
-    if visible_kp < 6 and phone_confidence <= 0:
+    if visible_kp < MIN_VISIBLE_KEYPOINTS and phone_confidence <= 0:
         return _unknown()
 
     if total < 1.0:
@@ -676,9 +682,12 @@ def analyze_pose(
     # ถ้าคะแนนชนะไม่ชัดเจน ให้เป็น unknown แทนการเดาเป็น attentive
     sorted_vals = sorted(scores.values(), reverse=True)
     margin = best_score - sorted_vals[1] if len(sorted_vals) > 1 else best_score
-    if priority_best is None and len(sorted_vals) > 1 and margin < 0.5:
+    if priority_best is None and len(sorted_vals) > 1 and margin < MIN_SCORE_MARGIN:
         return _unknown()
-    if best == "attentive" and (best_score < 2.0 or confidence < 40):
+    if best == "attentive" and (
+        best_score < ATTENTIVE_MIN_SCORE
+        or confidence < ATTENTIVE_MIN_CONFIDENCE
+    ):
         return _unknown()
 
     return {
@@ -721,9 +730,9 @@ def analyze_frame(
         results = model(
             processed,
             verbose=False,
-            conf=0.35,   # detection confidence ต่ำลงเพื่อจับคนที่ถูกจอบดบัง
+            conf=PERSON_DETECTION_CONFIDENCE,
             iou=0.45,    # NMS IoU ป้องกัน duplicate detection
-            imgsz=640,
+            imgsz=POSE_IMAGE_SIZE,
         )
 
     _empty = {
@@ -869,6 +878,143 @@ def analyze_frame(
     if refine_phone_detection:
         analysis_result["_context_objects"] = context_objects
     return analysis_result
+
+
+def get_behavior_measurement_criteria(transition_seconds=None):
+    """Return report-ready criteria derived from the active pose heuristics."""
+    confirmation = transition_seconds or {}
+    criteria = (
+        {
+            "behavior": "attentive",
+            "label": "ตั้งใจเรียน",
+            "measurement": (
+                "รวมคะแนนจากระดับจมูกเทียบแนวไหล่ ความตั้งตรงของลำตัว "
+                "ระยะระหว่างตา และการมองเห็นหู โดยจอใกล้ระดับสายตาเป็นบริบทช่วย"
+            ),
+            "decision_rule": (
+                f"คะแนนต้องไม่น้อยกว่า {ATTENTIVE_MIN_SCORE:.0f}, "
+                f"ความมั่นใจไม่น้อยกว่า {ATTENTIVE_MIN_CONFIDENCE}% "
+                f"และชนะคะแนนอันดับถัดไปอย่างน้อย {MIN_SCORE_MARGIN:.1f}"
+            ),
+            "limitation": (
+                "เป็นการอนุมานจากท่าทาง ไม่ยืนยันว่ากำลังอ่านหรือเข้าใจบทเรียน"
+            ),
+        },
+        {
+            "behavior": "sleeping",
+            "label": "หลับ",
+            "measurement": (
+                "จมูกอยู่ต่ำใกล้แนวไหล่ (สัดส่วนไม่เกิน 0.10 ของความกว้างไหล่) "
+                "ร่วมกับลำตัวพับหรือเอนมาก"
+            ),
+            "decision_rule": (
+                "แนวดิ่งไหล่ถึงสะโพกต่ำกว่า 0.35 หรือเยื้องแนวนอนมากกว่า "
+                "0.85 เท่าของความกว้างไหล่"
+            ),
+            "limitation": (
+                "ระบบไม่ตรวจการลืมตา/หลับตา จึงอาจสับสนกับการก้มเก็บของ "
+                "เอนตัว หรือถูกบัง"
+            ),
+        },
+        {
+            "behavior": "looking_down",
+            "label": "ก้มหน้า",
+            "measurement": (
+                "วัดระดับจมูกเทียบจุดกึ่งกลางไหล่และความตั้งตรงของลำตัว "
+                "หากพบจอใกล้ระดับสายตาจะลดคะแนนก้มหน้า"
+            ),
+            "decision_rule": (
+                "สัดส่วนระดับศีรษะไม่เกิน 0.30 เริ่มเพิ่มคะแนนก้มหน้า "
+                "และต้องชนะพฤติกรรมอื่นตามเกณฑ์คะแนนรวม"
+            ),
+            "limitation": (
+                "แยกไม่ได้แน่นอนว่ากำลังจดบันทึก อ่านเอกสาร หรือทำกิจกรรมอื่น"
+            ),
+        },
+        {
+            "behavior": "phone_use",
+            "label": "ใช้โทรศัพท์",
+            "measurement": (
+                "YOLO ตรวจพบวัตถุโทรศัพท์ใกล้กรอบบุคคล หรือพบจากการตรวจซ้ำ "
+                "บนภาพครอปของผู้ที่มีท่ามือเข้าข่าย"
+            ),
+            "decision_rule": (
+                "ต้องมีวัตถุ class โทรศัพท์ผ่านค่า confidence ที่ตั้งไว้ "
+                "และสัมพันธ์กับกรอบบุคคล"
+            ),
+            "limitation": (
+                "โทรศัพท์ที่เล็ก เบลอ ถูกมือบัง หรือมุมไม่ชัดอาจตรวจไม่พบ"
+            ),
+        },
+        {
+            "behavior": "phone_suspected",
+            "label": "สงสัยใช้โทรศัพท์",
+            "measurement": (
+                "ข้อมือสองข้างห่างกันไม่เกิน 0.85 เท่าของความกว้างไหล่ "
+                "อยู่ต่ำกว่าไหล่อย่างน้อย 0.35 เท่า และปลายแขนบรรจบกัน"
+            ),
+            "decision_rule": (
+                "ใช้เมื่อท่ามือเข้าเกณฑ์แต่ object detector ยังไม่พบโทรศัพท์"
+            ),
+            "limitation": (
+                "ไม่ใช่การยืนยัน อาจเป็นการพิมพ์ จับวัตถุ หรือประสานมือ"
+            ),
+        },
+        {
+            "behavior": "hand_raised",
+            "label": "ยกมือ",
+            "measurement": (
+                "ข้อมืออยู่เหนือใบหน้า ศอกอยู่ใกล้หรือเหนือระดับไหล่ "
+                "และข้อมือสูงกว่าศอก"
+            ),
+            "decision_rule": (
+                "ข้อมือสูงกว่าใบหน้า 0.08 เท่าของความกว้างไหล่ "
+                "และสูงกว่าศอก 0.20 เท่า"
+            ),
+            "limitation": (
+                "ท่าบังหน้า โบกมือ หรือมุมกล้องด้านข้างอาจให้ผลคล้ายกัน"
+            ),
+        },
+        {
+            "behavior": "standing",
+            "label": "ยืน/ลุก",
+            "measurement": (
+                "วัดแนวไหล่ สะโพก เข่า และข้อเท้า รวมทั้งมุมเข่าและความยาวลำตัว"
+            ),
+            "decision_rule": (
+                "ลำตัวต้องยาวเกิน 0.80 เท่าของความกว้างไหล่ และขาเหยียด "
+                "ด้วยมุมเข่าอย่างน้อย 150 องศา"
+            ),
+            "limitation": (
+                "ต้องเห็นช่วงล่างเพียงพอ โต๊ะหรือบุคคลอื่นบังขาอาจทำให้ไม่พบ"
+            ),
+        },
+        {
+            "behavior": "unknown",
+            "label": "ไม่ชัดเจน",
+            "measurement": (
+                "ใช้เมื่อ keypoint ที่เชื่อถือได้มีน้อยกว่า "
+                f"{MIN_VISIBLE_KEYPOINTS} จุด สัญญาณขัดแย้ง หรือคะแนนสูสีกัน"
+            ),
+            "decision_rule": (
+                f"คะแนนอันดับหนึ่งห่างอันดับสองน้อยกว่า {MIN_SCORE_MARGIN:.1f} "
+                "หรือข้อมูล pose ไม่เพียงพอ"
+            ),
+            "limitation": (
+                "หมายถึงระบบไม่มีหลักฐานพอสรุป ไม่ได้หมายถึงไม่มีพฤติกรรม"
+            ),
+        },
+    )
+    return [
+        {
+            **item,
+            "confirmation_seconds": round(
+                float(confirmation.get(item["behavior"], 0)),
+                1,
+            ),
+        }
+        for item in criteria
+    ]
 
 
 # ──────────────────────────────────────────────

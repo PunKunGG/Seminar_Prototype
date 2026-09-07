@@ -11,6 +11,8 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from server import (
+    CONFIG,
+    _analysis_methodology,
     _analyze_frame_with_context,
     _context_objects_for_frame,
     _store_buffer_frame,
@@ -101,6 +103,33 @@ class FrameBufferTests(unittest.TestCase):
         self.assertEqual(result, {"behaviors": []})
         self.assertEqual(cached, refined)
         self.assertTrue(analyzer.call_args.kwargs["refine_phone_detection"])
+
+
+class AnalysisMethodologyTests(unittest.TestCase):
+    def test_methodology_exposes_active_criteria_and_overview_windows(self):
+        methodology = _analysis_methodology()
+        criteria = {
+            item["behavior"]: item
+            for item in methodology["criteria"]
+        }
+
+        self.assertEqual(len(criteria), 8)
+        self.assertEqual(
+            methodology["realtime_summary_interval_seconds"],
+            CONFIG.realtime_stats_interval,
+        )
+        self.assertEqual(
+            methodology["long_video_sampling"]["window_seconds"],
+            CONFIG.long_video_sample_window_seconds,
+        )
+        self.assertEqual(
+            criteria["sleeping"]["confirmation_seconds"],
+            8.0,
+        )
+        self.assertIn(
+            "ลืมตา/หลับตา",
+            criteria["sleeping"]["limitation"],
+        )
 
 
 if __name__ == "__main__":

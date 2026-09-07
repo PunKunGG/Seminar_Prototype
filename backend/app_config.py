@@ -234,7 +234,7 @@ def load_config(base_dir=None, environ=None):
             1,
             env_int(
                 "CLASSMOOD_LONG_VIDEO_SAMPLE_WINDOW_SECONDS",
-                10,
+                15,
                 environment,
             ),
         ),
@@ -392,7 +392,7 @@ def load_config(base_dir=None, environ=None):
             1.0,
             env_float(
                 "CLASSMOOD_REALTIME_STATS_INTERVAL",
-                4.0,
+                10.0,
                 environment,
             ),
         ),

@@ -105,6 +105,41 @@ function behaviorLabel(value) {
   }[value] || value || "-";
 }
 
+function formatReportDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("th-TH", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatRecordingPeriod(session = {}) {
+  const start = session.recording_started_at;
+  const end = session.ended_at;
+  if (!start) return "-";
+  const startLabel = formatReportDateTime(start);
+  const endLabel = end ? formatReportDateTime(end) : "กำลังวิเคราะห์";
+  const startDate = new Date(start);
+  const endDate = new Date(end || Date.now());
+  const duration = endDate.getTime() - startDate.getTime();
+  const durationLabel = Number.isFinite(duration) && duration >= 0
+    ? ` (${formatDuration(duration / 1000)})`
+    : "";
+  return `${startLabel} - ${endLabel}${durationLabel}`;
+}
+
+function formatBehaviorMetric(track, behavior) {
+  const count = toWholePeople(track?.event_counts?.[behavior]);
+  const duration = formatDuration(track?.behavior_seconds?.[behavior]);
+  return `${count} ครั้ง / ${duration}`;
+}
+
 function renderLiveTracks(tracks = []) {
   const body = document.getElementById("liveTrackRows");
   const empty = document.getElementById("liveTrackEmpty");
@@ -140,42 +175,64 @@ function renderTrackingReport(tracking = null) {
   const body = document.getElementById("reportTrackingRows");
   if (!section || !body) return;
 
-  const periods = tracking?.periods || [];
-  const overallTracks = tracking?.tracks || [];
-  const rows = periods.length
-    ? periods.flatMap((period) =>
-        (period.tracks || []).map((track) => ({
-          ...track,
-          period_label: period.label,
-        })),
-      )
-    : overallTracks.map((track) => ({
-        ...track,
-        period_label: "ภาพรวม",
-      }));
+  const rows = tracking?.tracks || [];
 
   section.classList.toggle("hidden", rows.length === 0);
   body.innerHTML = rows
     .map((track, index) => {
-      const counts = track.event_counts || {};
       const rowClass = index % 2 === 0 ? "bg-white" : "bg-gray-50";
       return `
         <tr class="${rowClass}">
-          <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(track.period_label)}</td>
           <td class="px-3 py-2 font-semibold text-blue-700 whitespace-nowrap">ID ${toWholePeople(track.track_id)}</td>
           <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(track.visible_seconds)}</td>
           <td class="px-3 py-2 text-right font-semibold text-green-700">${formatDecimal(track.attention_rate)}%</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.attentive)}</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.sleeping)}</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.looking_down)}</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.phone_use)}</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.phone_suspected)}</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.hand_raised)}</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.standing)}</td>
-          <td class="px-3 py-2 text-right">${toWholePeople(counts.unknown)}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "attentive")}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "sleeping")}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "looking_down")}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "phone_use")}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "phone_suspected")}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "hand_raised")}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "standing")}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "unknown")}</td>
         </tr>
       `;
     })
+    .join("");
+}
+
+function renderAnalysisMethodology(methodology = null) {
+  const section = document.getElementById("reportMethodologySection");
+  const body = document.getElementById("reportMethodologyRows");
+  const limitations = document.getElementById("reportMethodologyLimitations");
+  if (!section || !body || !limitations) return;
+
+  const criteria = methodology?.criteria || [];
+  section.classList.toggle("hidden", criteria.length === 0);
+  setTextIfPresent(
+    "reportAttentionFormula",
+    `สูตรอัตราความตั้งใจ: ${methodology?.attention_formula || "-"}`,
+  );
+  setTextIfPresent(
+    "reportMethodologyCaption",
+    methodology
+      ? `${methodology.pose_model || "Pose"} | ตรวจคน >= ${formatDecimal((methodology.person_detection_confidence || 0) * 100)}% | keypoint >= ${formatDecimal((methodology.keypoint_confidence || 0) * 100)}% | ตรวจวัตถุ >= ${formatDecimal((methodology.context_detection_confidence || 0) * 100)}% ทุก ${formatDecimal(methodology.context_detection_interval_seconds)} วินาที`
+      : "อ้างอิงจากค่าที่ระบบใช้ในรอบนี้",
+  );
+  body.innerHTML = criteria
+    .map((item, index) => `
+      <tr class="${index % 2 === 0 ? "bg-white" : "bg-gray-50"}">
+        <td class="px-3 py-2 font-semibold text-gray-800 whitespace-nowrap">${escapeHtml(item.label || behaviorLabel(item.behavior))}</td>
+        <td class="px-3 py-2 text-gray-700">
+          <p>${escapeHtml(item.measurement || "-")}</p>
+          <p class="mt-1 text-gray-500">เกณฑ์: ${escapeHtml(item.decision_rule || "-")}</p>
+        </td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">${formatDecimal(item.confirmation_seconds)} วินาที</td>
+        <td class="px-3 py-2 text-gray-600">${escapeHtml(item.limitation || "-")}</td>
+      </tr>
+    `)
+    .join("");
+  limitations.innerHTML = (methodology?.limitations || [])
+    .map((item) => `<li>${escapeHtml(item)}</li>`)
     .join("");
 }
 
@@ -852,46 +909,83 @@ function appendTrackingExportRows(rows) {
   rows.push(["รายวิชา", session.course_name || "ไม่ระบุ"]);
   rows.push(["ห้อง", session.room_name || "ไม่ระบุ"]);
   rows.push(["เวลาเริ่มบันทึก", session.recording_started_at || "-"]);
+  rows.push(["เวลาสิ้นสุด", session.ended_at || "-"]);
 
-  const periods = tracking.periods || [];
-  const reportRows = periods.length
-    ? periods.flatMap((period) =>
-        (period.tracks || []).map((track) => [period.label, track]),
-      )
-    : (tracking.tracks || []).map((track) => ["ภาพรวม", track]);
+  const methodology = latestExportData?.analysis_methodology;
+  if (methodology?.criteria?.length) {
+    rows.push([]);
+    rows.push(["เกณฑ์การวัดพฤติกรรมและข้อจำกัด"]);
+    rows.push(["สูตรอัตราความตั้งใจ", methodology.attention_formula]);
+    rows.push([
+      "พฤติกรรม",
+      "สิ่งที่วัด",
+      "เกณฑ์ตัดสิน",
+      "ยืนยันก่อนเปลี่ยนสถานะ (วินาที)",
+      "ข้อจำกัด",
+    ]);
+    for (const item of methodology.criteria) {
+      rows.push([
+        item.label || behaviorLabel(item.behavior),
+        item.measurement,
+        item.decision_rule,
+        item.confirmation_seconds,
+        item.limitation,
+      ]);
+    }
+    for (const limitation of methodology.limitations || []) {
+      rows.push(["ข้อจำกัดรวม", limitation]);
+    }
+  }
+
+  const reportRows = tracking.tracks || [];
   if (!reportRows.length) return;
 
   rows.push([]);
   rows.push(["สรุปตามรหัสตำแหน่ง (Position ID)"]);
   rows.push([
-    "ช่วงเวลา",
     "รหัสตำแหน่ง",
-    "เวลาที่ตรวจพบ (วินาที)",
+    "เวลาวิเคราะห์รวม (วินาที)",
     "ความตั้งใจ (%)",
     "ตั้งใจเรียน (ครั้ง)",
+    "ตั้งใจเรียน (วินาที)",
     "หลับ (ครั้ง)",
+    "หลับ (วินาที)",
     "ก้มหน้า (ครั้ง)",
+    "ก้มหน้า (วินาที)",
     "ใช้โทรศัพท์ (ครั้ง)",
+    "ใช้โทรศัพท์ (วินาที)",
     "สงสัยใช้โทรศัพท์ (ครั้ง)",
+    "สงสัยใช้โทรศัพท์ (วินาที)",
     "ยกมือ (ครั้ง)",
+    "ยกมือ (วินาที)",
     "ยืน/ลุก (ครั้ง)",
+    "ยืน/ลุก (วินาที)",
     "ไม่ชัดเจน (ครั้ง)",
+    "ไม่ชัดเจน (วินาที)",
   ]);
-  for (const [periodLabel, track] of reportRows) {
+  for (const track of reportRows) {
     const counts = track.event_counts || {};
+    const durations = track.behavior_seconds || {};
     rows.push([
-      periodLabel,
       `ID ${track.track_id}`,
       track.visible_seconds,
       track.attention_rate,
       toWholePeople(counts.attentive),
+      Number(durations.attentive) || 0,
       toWholePeople(counts.sleeping),
+      Number(durations.sleeping) || 0,
       toWholePeople(counts.looking_down),
+      Number(durations.looking_down) || 0,
       toWholePeople(counts.phone_use),
+      Number(durations.phone_use) || 0,
       toWholePeople(counts.phone_suspected),
+      Number(durations.phone_suspected) || 0,
       toWholePeople(counts.hand_raised),
+      Number(durations.hand_raised) || 0,
       toWholePeople(counts.standing),
+      Number(durations.standing) || 0,
       toWholePeople(counts.unknown),
+      Number(durations.unknown) || 0,
     ]);
   }
 
@@ -1156,6 +1250,7 @@ async function exportReport() {
   renderTrackingReport(null);
   renderBehaviorEvents(null);
   renderEvidenceReport(null);
+  renderAnalysisMethodology(null);
 
   // ชื่อรอบ
   const labName =
@@ -1201,6 +1296,16 @@ async function exportReport() {
       "reportSessionContext",
       `วิชา: ${session.course_name || currentCourseName || "ไม่ระบุ"} | ห้อง: ${session.room_name || currentRoomName || "ไม่ระบุ"}`,
     );
+    set(
+      "reportRecordingPeriod",
+      `ช่วงเวลาคาบ: ${formatRecordingPeriod(session)}`,
+    );
+    const methodology = latestExportData.analysis_methodology || {};
+    const sampling = methodology.long_video_sampling || {};
+    set(
+      "reportAnalysisMode",
+      `รูปแบบการวิเคราะห์: สรุปผล real-time ทุก ${formatDecimal(methodology.realtime_summary_interval_seconds)} วินาที | คลิปยาววิเคราะห์ช่วงละ ${formatDecimal(sampling.window_seconds)} วินาที`,
+    );
     set("reportAvgPeople", `นักเรียนเฉลี่ย: ${s.avg_people ?? 0} คน`);
     set(
       "reportAvgAttention",
@@ -1234,6 +1339,7 @@ async function exportReport() {
     renderTrackingReport(tracking);
     renderBehaviorEvents(tracking);
     renderEvidenceReport(tracking);
+    renderAnalysisMethodology(methodology);
   } catch (e) {
     console.error("Error fetching export data:", e);
     latestExportData = null;
@@ -1241,6 +1347,7 @@ async function exportReport() {
     renderTrackingReport(null);
     renderBehaviorEvents(null);
     renderEvidenceReport(null);
+    renderAnalysisMethodology(null);
     const recEl = document.getElementById("reportRecords");
     if (recEl) recEl.textContent = "ไม่สามารถโหลดข้อมูลได้";
   }

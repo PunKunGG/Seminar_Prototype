@@ -146,16 +146,27 @@
     <!-- Main Content -->
     <div id="appContent" class="hidden container mx-auto px-6 py-8">
       <!-- Session Start Menu -->
-      <div id="labMenu" class="space-y-6">
-        <div class="text-center mb-8">
-          <h2 class="text-3xl font-bold text-gray-800 mb-2">
-            เริ่มรอบวิเคราะห์
-          </h2>
-          <p class="text-gray-600">ใช้ได้ทั้งเว็บแคมและคลิปวิดีโอ</p>
+      <div id="labMenu">
+        <div id="sessionHistoryView" class="space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <h2 class="text-2xl font-bold text-gray-800">รอบวิเคราะห์</h2>
+            <button type="button" id="showNewSessionBtn" onclick="showNewSessionForm()"
+              class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium">
+              สร้างรอบใหม่
+            </button>
+          </div>
+          <div id="sessionHistory" class="space-y-3"></div>
         </div>
 
-        <div class="max-w-2xl mx-auto bg-white rounded-xl shadow-lg p-6">
-          <div class="space-y-5">
+        <div id="newSessionFormSection" class="hidden space-y-6">
+          <div class="flex items-center gap-4">
+            <button type="button" onclick="showSessionHistory()" aria-label="กลับไปประวัติ"
+              class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg" title="กลับไปประวัติ">
+              ←
+            </button>
+            <h2 class="text-2xl font-bold text-gray-800">สร้างรอบใหม่</h2>
+          </div>
+          <div class="max-w-2xl mx-auto bg-white rounded-xl shadow-lg p-6 space-y-5">
             <div>
               <label
                 for="sessionNameInput"
@@ -203,27 +214,9 @@
             </div>
 
             <div>
-              <label
-                for="recordingStartInput"
-                class="block text-sm font-medium text-gray-700 mb-2"
-                >เวลาเริ่มบันทึก</label
-              >
-              <input
-                id="recordingStartInput"
-                type="datetime-local"
-                class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-400"
-              />
-            </div>
-
-            <div class="grid md:grid-cols-2 gap-3">
-              <div class="border border-blue-100 bg-blue-50 rounded-lg p-4">
-                <p class="font-semibold text-blue-800">เว็บแคม</p>
-                <p class="text-sm text-blue-700 mt-1">วิเคราะห์จากกล้องที่ต่อกับเครื่อง</p>
-              </div>
-              <div class="border border-purple-100 bg-purple-50 rounded-lg p-4">
-                <p class="font-semibold text-purple-800">คลิปวิดีโอ</p>
-                <p class="text-sm text-purple-700 mt-1">อัปโหลดไฟล์ที่บันทึกจากโทรศัพท์หรือกล้อง</p>
-              </div>
+              <label for="analysisIntervalInput" class="block text-sm font-medium text-gray-700 mb-2">ช่วงสรุปผล (15-300 วินาที)</label>
+              <input id="analysisIntervalInput" type="number" min="15" max="300" step="1" value="30" inputmode="numeric"
+                class="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-400" />
             </div>
 
             <button
@@ -271,7 +264,7 @@
                 onclick="exportReport()"
                 class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center space-x-2"
               >
-                <span>ส่งออกรายงาน</span>
+                <span>ดูรายงาน</span>
               </button>
             </div>
             <div class="flex items-center space-x-4">
@@ -291,13 +284,14 @@
           </div>
 
           <!-- Video Source Config -->
-          <div class="mt-4 pt-4 border-t border-gray-100">
-            <div class="flex flex-wrap items-center gap-3">
-              <span class="text-sm text-gray-600 font-medium whitespace-nowrap"
-                >แหล่งภาพ:</span
-              >
-
-              <!-- Webcam -->
+          <div class="mt-4 pt-4 border-t border-gray-100 space-y-4">
+            <div class="inline-flex rounded-lg border border-gray-200 p-1" role="group" aria-label="ประเภทแหล่งภาพ">
+              <button id="sourceModeVideoBtn" type="button" onclick="setSourceMode('video')"
+                class="px-4 py-2 rounded-md text-sm font-medium">วิดีโอ</button>
+              <button id="sourceModeWebcamBtn" type="button" onclick="setSourceMode('webcam')"
+                class="px-4 py-2 rounded-md text-sm font-medium">เว็บแคม</button>
+            </div>
+            <div id="webcamSourcePanel" class="hidden flex flex-wrap items-center gap-3">
               <select
                 id="webcamSelect"
                 class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
@@ -308,18 +302,28 @@
                 <option value="3">Webcam 3</option>
               </select>
               <button
+                id="startWebcamBtn"
                 onclick="connectWebcam()"
                 class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
               >
-                เว็บแคม
+                เริ่มเว็บแคม
               </button>
-
-              <!-- Video File -->
+              <button id="stopWebcamBtn" type="button" onclick="stopWebcam()"
+                class="hidden bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-1.5 rounded-lg">
+                หยุดเว็บแคม
+              </button>
+            </div>
+            <div id="videoSourcePanel" class="flex flex-wrap items-end gap-3">
+              <div>
+                <label for="recordingStartInput" class="block text-sm font-medium text-gray-700 mb-1">วันที่และเวลาเริ่มบันทึก</label>
+                <input id="recordingStartInput" type="datetime-local"
+                  class="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white" />
+              </div>
               <input
                 type="file"
                 id="videoFileInput"
                 accept="video/mp4,video/avi,video/quicktime,video/x-matroska,video/webm,.mp4,.avi,.mov,.mkv,.webm"
-                class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-400 w-64 bg-white"
+                class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-400 w-full max-w-full bg-white sm:w-64"
               />
               <button
                 id="uploadVideoBtn"
@@ -328,12 +332,8 @@
               >
                 อัปโหลดคลิป
               </button>
-
-              <!-- Status -->
-              <span id="sourceStatus" class="text-xs text-gray-500"
-                >&#9675; รอเลือกเว็บแคมหรือคลิป</span
-              >
             </div>
+            <span id="sourceStatus" class="text-xs text-gray-500">&#9675; รอเลือกเว็บแคมหรือคลิป</span>
           </div>
         </div>
 
@@ -376,12 +376,12 @@
                   </div>
                 </div>
                 <div
-                  class="absolute top-4 left-4 bg-black bg-opacity-70 text-white px-3 py-1 rounded-lg text-sm"
+                  class="hidden sm:block absolute top-4 left-4 max-w-[45%] truncate bg-black bg-opacity-70 text-white px-3 py-1 rounded-lg text-sm"
                 >
                   <span id="feedLabLabel">รอบวิเคราะห์</span> - แหล่งภาพหลัก
                 </div>
                 <div
-                  class="absolute top-4 right-4 bg-blue-600 bg-opacity-90 text-white px-3 py-1 rounded text-sm"
+                  class="absolute top-3 right-3 sm:top-4 sm:right-4 max-w-[calc(100%-1.5rem)] sm:max-w-[45%] truncate bg-blue-600 bg-opacity-90 text-white px-3 py-1 rounded text-xs sm:text-sm"
                   id="detectionCount"
                 >
                   ตรวจจับกำลังทำงาน...
@@ -736,7 +736,7 @@
               <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
                 <h4 class="font-semibold text-gray-800">สรุปตามช่วงเวลา</h4>
                 <span id="reportTimelineCaption" class="text-xs text-gray-500"
-                  >ช่วงละ 10 นาที</span
+                  >ช่วงละ 5 นาที</span
                 >
               </div>
               <div

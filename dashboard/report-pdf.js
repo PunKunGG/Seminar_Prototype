@@ -79,6 +79,9 @@ function generatePDF(labId) {
   const behaviorEventsWrapper = document.getElementById(
     "reportBehaviorEventsTableWrapper",
   );
+  const behaviorEventsSection = document.getElementById(
+    "reportBehaviorEventsSection",
+  );
   const methodologyWrapper = document.getElementById(
     "reportMethodologyTableWrapper",
   );
@@ -92,6 +95,7 @@ function generatePDF(labId) {
     timelineOverflow: timelineWrapper?.style.overflow || "",
     trackingOverflow: trackingWrapper?.style.overflow || "",
     behaviorEventsOverflow: behaviorEventsWrapper?.style.overflow || "",
+    behaviorEventsDisplay: behaviorEventsSection?.style.display || "",
     methodologyOverflow: methodologyWrapper?.style.overflow || "",
   };
   const restoreReportLayout = () => {
@@ -105,6 +109,9 @@ function generatePDF(labId) {
     if (trackingWrapper) trackingWrapper.style.overflow = savedStyles.trackingOverflow;
     if (behaviorEventsWrapper) {
       behaviorEventsWrapper.style.overflow = savedStyles.behaviorEventsOverflow;
+    }
+    if (behaviorEventsSection) {
+      behaviorEventsSection.style.display = savedStyles.behaviorEventsDisplay;
     }
     if (methodologyWrapper) {
       methodologyWrapper.style.overflow = savedStyles.methodologyOverflow;
@@ -120,6 +127,7 @@ function generatePDF(labId) {
   if (timelineWrapper) timelineWrapper.style.overflow = "visible";
   if (trackingWrapper) trackingWrapper.style.overflow = "visible";
   if (behaviorEventsWrapper) behaviorEventsWrapper.style.overflow = "visible";
+  if (behaviorEventsSection) behaviorEventsSection.style.display = "none";
   if (methodologyWrapper) methodologyWrapper.style.overflow = "visible";
 
   waitForReportImages(reportContent)

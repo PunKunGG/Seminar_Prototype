@@ -24,6 +24,13 @@ access to Supabase's automatic-RLS trigger function from API users. The event
 trigger continues to enable RLS for new tables, but clients cannot invoke its
 `SECURITY DEFINER` function themselves.
 
+`migrations/20260920024135_grant_archive_worker.sql` grants the server-only
+`service_role` read/insert/update access to the eight archive tables and usage
+of the room/course ID sequences. It does not grant delete access or change
+browser-user RLS policies. This migration has been applied to the ClassMood
+project. The Python server also needs `SUPABASE_SECRET_KEY` (or the legacy
+`SUPABASE_SERVICE_ROLE_KEY`) in its private environment to use these grants.
+
 ## Applying to another project
 
 Run the migration once with the Supabase SQL Editor, or use the Supabase CLI

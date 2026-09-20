@@ -77,11 +77,14 @@ class SessionDatabase:
                 CREATE TABLE IF NOT EXISTS class_sessions (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
+                    owner_id TEXT,
                     room_id INTEGER,
                     course_id INTEGER,
                     source_type TEXT,
                     source_label TEXT,
                     recording_started_at TEXT NOT NULL,
+                    recording_ended_at TEXT,
+                    analysis_interval_seconds INTEGER NOT NULL DEFAULT 30,
                     created_at TEXT NOT NULL,
                     ended_at TEXT,
                     status TEXT NOT NULL DEFAULT 'active',
@@ -166,6 +169,19 @@ class SessionDatabase:
                     ON track_time_buckets(session_id, bucket_start_seconds);
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(class_sessions)")
+            }
+            for name, definition in (
+                ("owner_id", "TEXT"),
+                ("recording_ended_at", "TEXT"),
+                ("analysis_interval_seconds", "INTEGER NOT NULL DEFAULT 30"),
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE class_sessions ADD COLUMN {name} {definition}"
+                    )
 
     def _catalog_id(self, connection, table, name):
         clean_name = _clean_text(name, "ไม่ระบุ", 100)
@@ -188,6 +204,8 @@ class SessionDatabase:
         course_name,
         source_type,
         source_label,
+        owner_id=None,
+        analysis_interval_seconds=30,
         recording_started_at=None,
         reset_tracking=False,
     ):
@@ -200,27 +218,33 @@ class SessionDatabase:
             connection.execute(
                 """
                 INSERT INTO class_sessions(
-                    id, name, room_id, course_id, source_type, source_label,
-                    recording_started_at, created_at, ended_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active')
+                    id, name, owner_id, room_id, course_id, source_type,
+                    source_label, recording_started_at, recording_ended_at,
+                    analysis_interval_seconds, created_at, ended_at, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, 'active')
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
+                    owner_id = excluded.owner_id,
                     room_id = excluded.room_id,
                     course_id = excluded.course_id,
                     source_type = excluded.source_type,
                     source_label = excluded.source_label,
                     recording_started_at = excluded.recording_started_at,
+                    recording_ended_at = NULL,
+                    analysis_interval_seconds = excluded.analysis_interval_seconds,
                     ended_at = NULL,
                     status = 'active'
                 """,
                 (
                     session_id,
                     _clean_text(name, session_id, 120),
+                    _clean_text(owner_id, max_length=64) or None,
                     room_id,
                     course_id,
                     _clean_text(source_type, max_length=20),
                     _clean_text(source_label, max_length=260),
                     _parse_recording_start(recording_started_at),
+                    max(15, min(300, int(analysis_interval_seconds))),
                     _utc_now(),
                 ),
             )
@@ -370,16 +394,71 @@ class SessionDatabase:
                 ),
             )
 
-    def finish_session(self, session_id):
+    def finish_session(self, session_id, duration_seconds=None, status="completed"):
+        if status not in {"completed", "cancelled"}:
+            raise ValueError("Invalid session status")
         with self._write_lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT source_type, recording_started_at FROM class_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return
+            recording_end = _utc_now()
+            if row["source_type"] == "video" and duration_seconds is not None:
+                recording_end = (
+                    datetime.fromisoformat(row["recording_started_at"])
+                    + timedelta(seconds=max(0, float(duration_seconds)))
+                ).isoformat(timespec="seconds")
             connection.execute(
                 """
                 UPDATE class_sessions
-                SET status = 'completed', ended_at = ?
+                SET status = ?, ended_at = ?, recording_ended_at = ?
                 WHERE id = ?
                 """,
-                (_utc_now(), session_id),
+                (status, _utc_now(), recording_end, session_id),
             )
+
+    def get_session(self, session_id):
+        with self._connection() as connection:
+            return self._session_metadata(connection, session_id)
+
+    def list_sessions(self, owner_id=None):
+        with self._connection() as connection:
+            if owner_id is None:
+                rows = connection.execute(
+                    "SELECT id FROM class_sessions ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id FROM class_sessions WHERE owner_id = ? "
+                    "ORDER BY created_at DESC",
+                    (owner_id,),
+                ).fetchall()
+            return [self._session_metadata(connection, row["id"]) for row in rows]
+
+    def archive_rows(self, session_id):
+        with self._connection() as connection:
+            tables = {}
+            for table in (
+                "session_tracks", "behavior_events", "track_time_buckets",
+                "evidence_images",
+            ):
+                rows = connection.execute(
+                    f"SELECT * FROM {table} WHERE session_id = ?",
+                    (session_id,),
+                ).fetchall()
+                items = [dict(row) for row in rows]
+                for item in items:
+                    for key in ("behavior_seconds", "event_counts"):
+                        encoded = item.pop(f"{key}_json", None)
+                        if encoded is not None:
+                            item[key] = json.loads(encoded)
+                    if table == "session_tracks":
+                        item["active"] = bool(item["active"])
+                    item.pop("created_at", None)
+                tables[table] = items
+            return tables
 
     def _session_metadata(self, connection, session_id):
         row = connection.execute(
@@ -387,11 +466,14 @@ class SessionDatabase:
             SELECT
                 sessions.id,
                 sessions.name,
+                sessions.owner_id,
                 rooms.name AS room_name,
                 courses.name AS course_name,
                 sessions.source_type,
                 sessions.source_label,
                 sessions.recording_started_at,
+                sessions.recording_ended_at,
+                sessions.analysis_interval_seconds,
                 sessions.created_at,
                 sessions.ended_at,
                 sessions.status

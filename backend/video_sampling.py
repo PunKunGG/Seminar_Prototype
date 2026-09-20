@@ -1,4 +1,5 @@
 import math
+from datetime import datetime, timedelta
 
 
 BEHAVIOR_KEYS = (
@@ -201,13 +202,15 @@ def summarize_report_history(history):
     }
 
 
-def build_report_periods(history, period_seconds=600):
-    """Group sampled-video history into readable report periods."""
+def build_report_periods(history, period_seconds=300, recording_start=None):
+    """Group source-relative observations into readable report periods."""
     period = max(60, int(period_seconds))
     buckets = {}
 
     for item in history:
-        position = item.get("video_position_seconds")
+        position = item.get(
+            "observation_seconds", item.get("video_position_seconds")
+        )
         try:
             position = float(position)
         except (TypeError, ValueError):
@@ -219,6 +222,10 @@ def build_report_periods(history, period_seconds=600):
         buckets.setdefault(bucket_index, []).append(item)
 
     periods = []
+    try:
+        start_time = datetime.fromisoformat(recording_start) if recording_start else None
+    except (TypeError, ValueError):
+        start_time = None
     for bucket_index in sorted(buckets):
         items = buckets[bucket_index]
         aggregate = aggregate_analyses(items)
@@ -227,13 +234,20 @@ def build_report_periods(history, period_seconds=600):
 
         start_seconds = bucket_index * period
         end_seconds = start_seconds + period
+        if start_time is None:
+            label = (
+                f"{format_video_time(start_seconds)[:5]} - "
+                f"{format_video_time(end_seconds)[:5]}"
+            )
+        else:
+            label = (
+                f"{start_time + timedelta(seconds=start_seconds):%H:%M} - "
+                f"{start_time + timedelta(seconds=end_seconds):%H:%M}"
+            )
         periods.append({
             "start_seconds": start_seconds,
             "end_seconds": end_seconds,
-            "label": (
-                f"{format_video_time(start_seconds)} - "
-                f"{format_video_time(end_seconds)}"
-            ),
+            "label": label,
             "avg_attention_rate": round(
                 sum(float(item.get("attention_rate") or 0) for item in items)
                 / len(items),

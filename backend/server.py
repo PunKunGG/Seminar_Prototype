@@ -37,6 +37,7 @@ from person_tracking import (
     SessionTracker,
 )
 from session_database import SessionDatabase
+from supabase_archive import ArchiveError, SupabaseArchive
 from video_sampling import (
     aggregate_analyses,
     build_report_periods,
@@ -90,6 +91,16 @@ PUBLIC_API_PATHS = frozenset({
 })
 
 
+def _owns_local_session(session_id):
+    if not CONFIG.supabase_auth_enabled:
+        return True
+    stored = session_database.get_session(session_id)
+    return bool(
+        stored and stored.get("owner_id") ==
+        (session.get("auth_user") or {}).get("id")
+    )
+
+
 def _no_store(response):
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
@@ -106,6 +117,12 @@ def require_authenticated_api_session():
     ):
         return None
     if isinstance(session.get("auth_user"), dict):
+        view_args = request.view_args or {}
+        analysis_id = view_args.get("lab_id") or view_args.get("session_id")
+        if analysis_id:
+            stored = session_database.get_session(analysis_id)
+            if stored and stored.get("owner_id") != session["auth_user"]["id"]:
+                return _no_store(jsonify({"error": "Analysis session not found"})), 404
         return None
     return _no_store(jsonify({"error": "Authentication required"})), 401
 
@@ -178,6 +195,11 @@ app.config["MAX_CONTENT_LENGTH"] = (
     CONFIG.max_video_upload_mb * 1024 * 1024
 )
 session_database = SessionDatabase(CONFIG.session_database_file)
+supabase_archive = (
+    SupabaseArchive(CONFIG.supabase_url, CONFIG.supabase_server_key)
+    if CONFIG.supabase_server_key else None
+)
+archive_states = {}
 evidence_store = EvidenceStore(
     CONFIG.evidence_dir,
     jpeg_quality=CONFIG.evidence_jpeg_quality,
@@ -306,7 +328,7 @@ def _set_source_state(key, **updates):
         return dict(state)
 
 
-def _probe_source(cap, source):
+def _probe_source(cap, source, analysis_interval_seconds=30):
     metadata = {
         "processing_mode": "realtime",
         "duration_seconds": None,
@@ -333,15 +355,13 @@ def _probe_source(cap, source):
     ):
         metadata.update({
             "processing_mode": "sampled",
-            "sample_interval_seconds": (
-                CONFIG.long_video_sample_interval_seconds
-            ),
+            "sample_interval_seconds": analysis_interval_seconds,
             "sample_window_seconds": (
-                CONFIG.long_video_sample_window_seconds
+                min(CONFIG.long_video_sample_window_seconds, analysis_interval_seconds)
             ),
             "sample_fps": CONFIG.long_video_sample_fps,
             "total_windows": int(math.ceil(
-                duration / CONFIG.long_video_sample_interval_seconds,
+                duration / analysis_interval_seconds,
             )),
         })
     return metadata
@@ -726,20 +746,82 @@ def _capture_evidence(lab_id, cam_id, frame, detections, timestamp):
                 counts[item["track_id"]] = counts.get(item["track_id"], 0) + 1
 
 
-def _finalize_tracking(lab_id, cam_id, timestamp=None):
+def _finalize_tracking(lab_id, cam_id, timestamp=None, status="completed"):
     key = (lab_id, cam_id)
     tracker = _get_session_tracker(lab_id, cam_id)
     if tracker is None:
         return
     try:
+        source_state = source_states.get(key, {})
+        if source_state.get("processing_mode") != "sampled":
+            analysis = _get_cached(lab_id, cam_id)
+            if analysis and analysis.get("summary") is not None:
+                source = video_sources.get(key)
+                observed = (
+                    timestamp if isinstance(source, str)
+                    else max(0, time.monotonic() - source_state.get(
+                        "started_monotonic", time.monotonic(),
+                    ))
+                )
+                with state_lock:
+                    history = stats_history.get(lab_id, [])
+                    last = history[-1].get("observation_seconds", -1) if history else -1
+                if observed is not None and observed - last >= 1:
+                    record_stats(
+                        lab_id, analysis,
+                        video_position_seconds=observed if isinstance(source, str) else None,
+                        observation_seconds=observed,
+                    )
         snapshot = tracker.finalize(timestamp)
         session_database.sync_tracking(lab_id, snapshot)
-        session_database.finish_session(lab_id)
+        source = video_sources.get(key)
+        source_state = source_states.get(key, {})
+        video_duration = (
+            source_state.get("duration_seconds") or timestamp
+            if status == "completed" else timestamp
+        )
+        session_database.finish_session(
+            lab_id,
+            duration_seconds=video_duration if isinstance(source, str) else None,
+            status=status,
+        )
+        if status == "completed":
+            _schedule_archive(lab_id)
     except Exception as error:
         print(f"Tracking finalization failed for {lab_id}/{cam_id}: {error}")
     finally:
         with state_lock:
             tracking_last_persisted.pop(key, None)
+
+
+def _schedule_archive(session_id):
+    if supabase_archive is None:
+        return
+    metadata = session_database.get_session(session_id)
+    if not metadata or not metadata.get("owner_id"):
+        return
+    with state_lock:
+        if archive_states.get(session_id) in {"syncing", "synced"}:
+            return
+        archive_states[session_id] = "syncing"
+
+    def archive():
+        try:
+            supabase_archive.archive_report(
+                metadata["owner_id"],
+                _build_export_data(session_id),
+                evidence_store,
+                session_database.archive_rows(session_id),
+            )
+        except Exception as error:
+            with state_lock:
+                archive_states[session_id] = "failed"
+            print(f"Archive failed for {session_id}: {error}")
+        else:
+            with state_lock:
+                archive_states[session_id] = "synced"
+
+    threading.Thread(target=archive, daemon=True).start()
 
 
 def _apply_tracking(
@@ -793,13 +875,23 @@ def _maybe_record_realtime_stats(lab_id, cam_id, analysis):
         if source_state.get("processing_mode") == "sampled":
             return
         now = time.monotonic()
-        if (
-            now - stats_last_recorded.get(key, 0)
-            < CONFIG.realtime_stats_interval
-        ):
+        interval = source_state.get(
+            "analysis_interval_seconds", CONFIG.realtime_stats_interval,
+        )
+        if now - stats_last_recorded.get(key, 0) < interval:
             return
         stats_last_recorded[key] = now
-    record_stats(lab_id, analysis)
+        is_video = source_state.get("source_type") == "video"
+        started_monotonic = source_state.get("started_monotonic", now)
+    position = _source_observation_time(lab_id, cam_id) if is_video else None
+    record_stats(
+        lab_id,
+        analysis,
+        video_position_seconds=position,
+        observation_seconds=(
+            position if is_video else max(0, now - started_monotonic)
+        ),
+    )
 
 
 def _capture_sampled_video(key, buf, cap, metadata):
@@ -904,6 +996,7 @@ def _capture_sampled_video(key, buf, cap, metadata):
                 aggregate,
                 time_label=format_video_time(window_start),
                 video_position_seconds=round(window_start, 1),
+                observation_seconds=round(window_start, 1),
             )
 
         _set_source_state(
@@ -1112,6 +1205,7 @@ def _start_capture(lab_id, cam_id, source, metadata=None):
         ended=False,
         error=None,
         started_at=_now_str(),
+        started_monotonic=time.monotonic(),
         ended_at=None,
         progress_percent=0 if metadata.get("processing_mode") == "sampled" else None,
         position_seconds=0 if metadata.get("processing_mode") == "sampled" else None,
@@ -1146,7 +1240,14 @@ def _stop_capture(lab_id, cam_id):
         _finalize_tracking(
             lab_id,
             cam_id,
-            frame_buffers[key].get("position_seconds"),
+            frame_buffers[key].get("position_seconds")
+            if isinstance(video_sources.get(key), str) else None,
+            status=(
+                "completed"
+                if not isinstance(video_sources.get(key), str)
+                or frame_buffers[key].get("ended")
+                else "cancelled"
+            ),
         )
         del frame_buffers[key]
     video_sources.pop(key, None)
@@ -1423,22 +1524,71 @@ def get_session_tracks(session_id):
     )
 
 
+@app.get("/api/sessions")
+def list_analysis_sessions():
+    owner_id = (
+        (session.get("auth_user") or {}).get("id")
+        if CONFIG.supabase_auth_enabled else None
+    )
+    local = session_database.list_sessions(owner_id)
+    combined = {item["id"]: {**item, "storage": "local"} for item in local}
+    archive_error = None
+    if supabase_archive is not None and owner_id:
+        try:
+            remote = supabase_archive.list_sessions(owner_id)
+            for item in remote:
+                if item["id"] not in combined:
+                    combined[item["id"]] = {
+                        **item,
+                        "recording_ended_at": item.get("ended_at"),
+                        "storage": "supabase",
+                    }
+                else:
+                    combined[item["id"]]["storage"] = "supabase"
+            remote_ids = {item["id"] for item in remote}
+            for item in local:
+                if item["status"] == "completed" and item["id"] not in remote_ids:
+                    _schedule_archive(item["id"])
+        except ArchiveError:
+            archive_error = "Supabase archive is unavailable"
+    return _no_store(jsonify({
+        "sessions": sorted(
+            combined.values(),
+            key=lambda item: item.get("recording_started_at") or "",
+            reverse=True,
+        ),
+        "archive_enabled": supabase_archive is not None,
+        "archive_error": archive_error,
+    }))
+
+
 @app.route("/api/evidence/<session_id>/<path:filename>")
 def get_evidence_image(session_id, filename):
-    blocked = _require_local_source_access()
-    if blocked:
-        return blocked
+    if not CONFIG.supabase_auth_enabled:
+        blocked = _require_local_source_access()
+        if blocked:
+            return blocked
 
     path = evidence_store.resolve_file(session_id, filename)
-    if path is None or not os.path.isfile(path):
-        return jsonify({"error": "Evidence image not found"}), 404
-    return send_from_directory(
-        evidence_store.session_directory(session_id),
-        filename,
-        mimetype="image/jpeg",
-        conditional=True,
-        max_age=0,
-    )
+    if path is not None and os.path.isfile(path):
+        return send_from_directory(
+            evidence_store.session_directory(session_id),
+            filename,
+            mimetype="image/jpeg",
+            conditional=True,
+            max_age=0,
+        )
+    owner_id = (session.get("auth_user") or {}).get("id")
+    if supabase_archive is not None and owner_id:
+        try:
+            image_data = supabase_archive.get_evidence(
+                owner_id, session_id, filename,
+            )
+        except ArchiveError:
+            return jsonify({"error": "Archive is unavailable"}), 503
+        if image_data is not None:
+            return _no_store(Response(image_data, mimetype="image/jpeg"))
+    return jsonify({"error": "Evidence image not found"}), 404
 
 
 # ✅ API 4: ส่งภาพพร้อม behavior annotation
@@ -1511,7 +1661,10 @@ def get_activities(lab_id):
 
 
 # 📝 ฟังก์ชันบันทึกสถิติ (เรียกครั้งเดียวต่อ cache miss)
-def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None):
+def record_stats(
+    lab_id, analysis, time_label=None, video_position_seconds=None,
+    observation_seconds=None,
+):
     now = datetime.now()
     time_str = time_label or now.strftime("%H:%M:%S")
 
@@ -1545,6 +1698,10 @@ def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None)
                 "video_position_seconds": video_position_seconds,
                 "sampled_frames": analysis.get("sampled_frames", 0),
             })
+        if observation_seconds is not None:
+            history_item["observation_seconds"] = round(
+                max(0, float(observation_seconds)), 3,
+            )
         stats_history[lab_id].append(history_item)
 
         # • แจ้งเตือนนักศึกษาหลับ
@@ -1569,36 +1726,72 @@ def record_stats(lab_id, analysis, time_label=None, video_position_seconds=None)
 
 
 # ✅ API 7: ส่งออกข้อมูลรายงานแบบครบถ้วน
-@app.route("/api/export/<lab_id>")
-def export_lab_data(lab_id):
+def _build_export_data(lab_id):
     with state_lock:
         history = list(stats_history.get(lab_id, []))
         activities = list(activity_log.get(lab_id, []))
 
     report_summary = summarize_report_history(history)
-    periods = build_report_periods(history)
     for cam_id, _tracker in _session_tracker_items(lab_id):
         _persist_tracking(lab_id, cam_id, force=True)
     tracking_report = _with_evidence_urls(
         lab_id,
         session_database.tracking_report(
             lab_id,
-            period_seconds=3600,
+            period_seconds=300,
         ),
     )
+    periods = build_report_periods(
+        history,
+        period_seconds=300,
+        recording_start=(tracking_report.get("session") or {}).get(
+            "recording_started_at"
+        ),
+    )
+    methodology = _analysis_methodology()
+    session_interval = (tracking_report.get("session") or {}).get(
+        "analysis_interval_seconds"
+    )
+    if session_interval:
+        methodology["realtime_summary_interval_seconds"] = session_interval
+        methodology["long_video_sampling"]["interval_seconds"] = session_interval
 
-    return jsonify({
+    return {
         "lab_id": lab_id,
-        "session_name": _session_label(lab_id),
+        "session_name": (
+            (tracking_report.get("session") or {}).get("name")
+            or _session_label(lab_id)
+        ),
         "export_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "summary": report_summary,
-        "period_seconds": 600 if periods else None,
+        "period_seconds": 300 if periods else None,
         "periods": periods,
         "tracking": tracking_report,
-        "analysis_methodology": _analysis_methodology(),
+        "analysis_methodology": methodology,
         "history": history,
         "activities": activities
-    })
+    }
+
+
+@app.route("/api/export/<lab_id>")
+def export_lab_data(lab_id):
+    local = session_database.get_session(lab_id)
+    owner_id = (session.get("auth_user") or {}).get("id")
+    if (
+        supabase_archive is not None and owner_id
+        and (local is None or local.get("status") == "completed")
+    ):
+        try:
+            archived = supabase_archive.get_report(owner_id, lab_id)
+        except ArchiveError:
+            if local is None:
+                return jsonify({"error": "Archive is unavailable"}), 503
+            archived = None
+        if archived:
+            return _no_store(jsonify(archived))
+    if local is not None:
+        return _no_store(jsonify(_build_export_data(lab_id)))
+    return jsonify({"error": "Analysis session not found"}), 404
 
 
 # ✅ API 8: ดึง Alerts ใหม่ (since_id)
@@ -1609,8 +1802,11 @@ def get_alerts():
     except ValueError:
         since_id = 0
     with state_lock:
-        new_alerts = [a for a in alerts_list if a["id"] > since_id]
+        candidates = [a for a in alerts_list if a["id"] > since_id]
         latest_id = _alert_id_ctr[0]
+    new_alerts = [
+        item for item in candidates if _owns_local_session(item["lab_id"])
+    ]
     return jsonify({"alerts": new_alerts, "latest_id": latest_id})
 
 
@@ -1620,7 +1816,9 @@ def get_overview():
     with state_lock:
         history_by_lab = {lab_id: list(items) for lab_id, items in stats_history.items()}
 
-    all_labs = sorted(history_by_lab.keys())
+    all_labs = sorted(
+        lab_id for lab_id in history_by_lab if _owns_local_session(lab_id)
+    )
     result = {}
     for lab_id in all_labs:
         history = history_by_lab.get(lab_id, [])
@@ -1769,10 +1967,14 @@ def get_sources():
         return blocked
 
     with state_lock:
-        result = {
+        sources = {
             f"{lid}/{cid}": dict(source_states.get((lid, cid), {"source": src}))
             for (lid, cid), src in video_sources.items()
         }
+    result = {
+        key: value for key, value in sources.items()
+        if _owns_local_session(key.rsplit("/", 1)[0])
+    }
     return jsonify(result)
 
 
@@ -1815,11 +2017,43 @@ def set_source(lab_id, cam_id):
     source = body.get("source")
     if source is None:
         return jsonify({"error": "Missing 'source' field"}), 400
+    try:
+        analysis_interval = int(body.get("analysis_interval_seconds", 30))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Analysis interval must be 15-300 seconds"}), 400
+    if not 15 <= analysis_interval <= 300:
+        return jsonify({"error": "Analysis interval must be 15-300 seconds"}), 400
+    existing = session_database.get_session(lab_id)
+    if existing and existing.get("owner_id") != (
+        (session.get("auth_user") or {}).get("id")
+        if CONFIG.supabase_auth_enabled else None
+    ):
+        return jsonify({"error": "Analysis session is not available"}), 404
+    if existing and existing.get("status") in {"completed", "cancelled"}:
+        return jsonify({"error": "Create a new analysis round"}), 409
+    if (lab_id, cam_id) in video_sources:
+        return jsonify({"error": "Stop this source before starting another"}), 409
+    if supabase_archive is not None and CONFIG.supabase_auth_enabled:
+        try:
+            remote_owner = supabase_archive.get_owner(lab_id)
+        except ArchiveError:
+            remote_owner = None
+        if remote_owner is not None:
+            return jsonify({"error": "Create a new analysis round"}), 409
     _set_session_name(lab_id, body.get("session_name"))
 
     source, source_error = _normalize_video_source(source)
     if source_error:
         return jsonify({"error": source_error}), 400
+    if isinstance(source, str):
+        try:
+            recording_start = datetime.fromisoformat(body["recording_start"])
+            if recording_start.tzinfo is None:
+                raise ValueError("Timezone is required")
+        except (KeyError, TypeError, ValueError):
+            return jsonify({
+                "error": "Video recording date and time with timezone is required",
+            }), 400
 
     # ตรวจสอบก่อนว่าเปิดได้จริง — คืน error ทันทีถ้าไม่ได้
     test_cap = cv2.VideoCapture(source)
@@ -1827,7 +2061,8 @@ def set_source(lab_id, cam_id):
         test_cap.release()
         label = f"webcam {source}" if isinstance(source, int) else source
         return jsonify({"error": f"ไม่สามารถเปิดได้: {label}"}), 400
-    metadata = _probe_source(test_cap, source)
+    metadata = _probe_source(test_cap, source, analysis_interval)
+    metadata["analysis_interval_seconds"] = analysis_interval
     test_cap.release()
 
     _stop_capture(lab_id, cam_id)
@@ -1839,12 +2074,16 @@ def set_source(lab_id, cam_id):
             room_name=body.get("room_name"),
             course_name=body.get("course_name"),
             source_type=_source_type(source),
+            owner_id=(session.get("auth_user") or {}).get("id"),
+            analysis_interval_seconds=analysis_interval,
             source_label=(
                 os.path.basename(source)
                 if isinstance(source, str)
                 else f"Webcam {source}"
             ),
-            recording_started_at=body.get("recording_start"),
+            recording_started_at=(
+                recording_start.isoformat() if isinstance(source, str) else None
+            ),
             reset_tracking=True,
         )
     except Exception as error:

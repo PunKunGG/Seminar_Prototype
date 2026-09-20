@@ -174,6 +174,7 @@ class AppConfig:
     track_position_max_distance: float
     supabase_url: str
     supabase_publishable_key: str
+    supabase_server_key: str
     supabase_auth_enabled: bool
     session_secret: str
     session_secret_file: str
@@ -198,6 +199,13 @@ def load_config(base_dir=None, environ=None):
     supabase_url, supabase_publishable_key, auth_enabled = (
         _supabase_settings(environment)
     )
+    supabase_server_key = (
+        environment.get("SUPABASE_SECRET_KEY")
+        or environment.get("SUPABASE_SERVICE_ROLE_KEY")
+        or ""
+    ).strip()
+    if supabase_server_key and not auth_enabled:
+        raise ValueError("Supabase server key requires Supabase Auth settings")
 
     allowed_origins = tuple(
         origin.strip()
@@ -221,10 +229,10 @@ def load_config(base_dir=None, environ=None):
         )
 
     sample_interval = max(
-        10,
+        15,
         env_int(
             "CLASSMOOD_LONG_VIDEO_SAMPLE_INTERVAL_SECONDS",
-            60,
+            30,
             environment,
         ),
     )
@@ -270,7 +278,7 @@ def load_config(base_dir=None, environ=None):
         ),
         max_history=max(
             30,
-            env_int("CLASSMOOD_MAX_HISTORY", 480, environment),
+            env_int("CLASSMOOD_MAX_HISTORY", 1200, environment),
         ),
         cache_ttl=4.0,
         max_webcam_index=env_int(
@@ -392,7 +400,7 @@ def load_config(base_dir=None, environ=None):
             1.0,
             env_float(
                 "CLASSMOOD_REALTIME_STATS_INTERVAL",
-                10.0,
+                30.0,
                 environment,
             ),
         ),
@@ -430,6 +438,7 @@ def load_config(base_dir=None, environ=None):
         ),
         supabase_url=supabase_url,
         supabase_publishable_key=supabase_publishable_key,
+        supabase_server_key=supabase_server_key,
         supabase_auth_enabled=auth_enabled,
         session_secret=environment.get(
             "CLASSMOOD_SESSION_SECRET",

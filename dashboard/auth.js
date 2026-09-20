@@ -51,6 +51,7 @@
       email.textContent = user?.email || (authEnabled ? "ผู้ใช้งาน" : "โหมดภายในเครื่อง");
       email.title = email.textContent;
     }
+    document.dispatchEvent(new Event("classmood:ready"));
   }
 
   async function parseResponse(response) {

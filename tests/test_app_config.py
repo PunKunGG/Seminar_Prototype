@@ -130,7 +130,8 @@ class AppConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = load_config(temp_dir, {})
 
-        self.assertEqual(config.realtime_stats_interval, 10.0)
+        self.assertEqual(config.realtime_stats_interval, 30.0)
+        self.assertEqual(config.long_video_sample_interval_seconds, 30)
         self.assertEqual(config.long_video_sample_window_seconds, 15)
 
     def test_supabase_auth_requires_a_complete_valid_pair(self):
@@ -148,6 +149,18 @@ class AppConfigTests(unittest.TestCase):
                 load_config(temp_dir, {
                     "CLASSMOOD_REQUIRE_AUTH": "true",
                 })
+
+    def test_server_key_requires_auth_configuration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(ValueError):
+                load_config(temp_dir, {"SUPABASE_SECRET_KEY": "sb_secret_test"})
+            config = load_config(temp_dir, {
+                "SUPABASE_URL": "https://example.supabase.co",
+                "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+                "SUPABASE_SECRET_KEY": "sb_secret_test",
+            })
+
+        self.assertEqual(config.supabase_server_key, "sb_secret_test")
 
     def test_supabase_auth_settings_are_normalized(self):
         with tempfile.TemporaryDirectory() as temp_dir:

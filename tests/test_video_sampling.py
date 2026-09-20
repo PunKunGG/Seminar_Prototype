@@ -89,7 +89,7 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual([grabs for _, grabs in steps], [0, 11, 12, 12])
 
-    def test_builds_ten_minute_report_periods_for_sampled_history(self):
+    def test_builds_five_minute_report_periods_for_sampled_history(self):
         history = []
         for minute in range(21):
             history.append({
@@ -104,13 +104,33 @@ class VideoSamplingTests(unittest.TestCase):
 
         periods = build_report_periods(history)
 
-        self.assertEqual(len(periods), 3)
-        self.assertEqual(periods[0]["label"], "00:00:00 - 00:10:00")
-        self.assertEqual(periods[0]["records"], 10)
+        self.assertEqual(len(periods), 5)
+        self.assertEqual(periods[0]["label"], "00:00 - 00:05")
+        self.assertEqual(periods[0]["records"], 5)
         self.assertEqual(periods[0]["avg_attention_rate"], 80.0)
         self.assertEqual(periods[0]["max_people"], 11)
-        self.assertEqual(periods[1]["avg_attention_rate"], 40.0)
-        self.assertEqual(periods[2]["records"], 1)
+        self.assertEqual(periods[2]["avg_attention_rate"], 40.0)
+        self.assertEqual(periods[4]["records"], 1)
+
+    def test_report_periods_include_webcam_elapsed_time(self):
+        periods = build_report_periods([{
+            "observation_seconds": 301,
+            "attention_rate": 75,
+            "total_people": 4,
+            "summary": {"attentive": 3, "unknown": 1},
+        }])
+
+        self.assertEqual(periods[0]["label"], "00:05 - 00:10")
+
+    def test_report_periods_use_recording_clock_time(self):
+        periods = build_report_periods([{
+            "observation_seconds": 301,
+            "attention_rate": 75,
+            "total_people": 4,
+            "summary": {"attentive": 3, "unknown": 1},
+        }], recording_start="2026-09-20T10:34:00+07:00")
+
+        self.assertEqual(periods[0]["label"], "10:39 - 10:44")
 
     def test_report_periods_ignore_realtime_history(self):
         periods = build_report_periods([{

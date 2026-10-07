@@ -1531,7 +1531,18 @@ def list_analysis_sessions():
         if CONFIG.supabase_auth_enabled else None
     )
     local = session_database.list_sessions(owner_id)
-    combined = {item["id"]: {**item, "storage": "local"} for item in local}
+    with state_lock:
+        histories = {item["id"]: list(stats_history.get(item["id"], [])) for item in local}
+    combined = {}
+    for item in local:
+        summary = summarize_report_history(histories[item["id"]])
+        has_records = summary["total_records"] > 0
+        combined[item["id"]] = {
+            **item,
+            "storage": "local",
+            "report_total_people": summary["report_total_people"] if has_records else None,
+            "avg_attention_rate": summary["avg_attention_rate"] if has_records else None,
+        }
     archive_error = None
     if supabase_archive is not None and owner_id:
         try:
@@ -1544,7 +1555,11 @@ def list_analysis_sessions():
                         "storage": "supabase",
                     }
                 else:
-                    combined[item["id"]]["storage"] = "supabase"
+                    combined[item["id"]].update({
+                        "storage": "supabase",
+                        "report_total_people": item.get("report_total_people"),
+                        "avg_attention_rate": item.get("avg_attention_rate"),
+                    })
             remote_ids = {item["id"] for item in remote}
             for item in local:
                 if item["status"] == "completed" and item["id"] not in remote_ids:

@@ -207,16 +207,22 @@ class SupabaseArchive:
         if not sessions:
             return []
         job_params = urlencode({
-            "select": "session_id",
+            "select": "session_id,summary:result_summary->summary",
             "owner_id": f"eq.{owner_id}",
+            "session_id": f"in.({','.join(item['id'] for item in sessions)})",
             "status": "eq.completed",
             "limit": "1000",
         })
-        completed_ids = {
-            item["session_id"]
+        summaries = {
+            item["session_id"]: item.get("summary") or {}
             for item in self._table("analysis_jobs", job_params) or []
         }
-        completed = [item for item in sessions if item["id"] in completed_ids]
+        completed = [item for item in sessions if item["id"] in summaries]
+        for item in completed:
+            summary = summaries[item["id"]]
+            has_records = summary.get("total_records", 0) > 0
+            item["report_total_people"] = summary.get("report_total_people", summary.get("max_people")) if has_records else None
+            item["avg_attention_rate"] = summary.get("avg_attention_rate") if has_records else None
         for table, id_field, name_field in (
             ("rooms", "room_id", "room_name"),
             ("courses", "course_id", "course_name"),

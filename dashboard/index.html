@@ -101,33 +101,7 @@
               <p class="text-blue-100 text-sm">ระบบวิเคราะห์พฤติกรรมในชั้นเรียน</p>
             </div>
           </div>
-          <div class="flex w-full flex-col gap-3 sm:w-auto sm:items-end">
-            <div
-              class="flex w-full rounded-xl bg-white/15 p-1 shadow-inner ring-1 ring-white/30 sm:w-auto"
-              role="group"
-              aria-label="เลือกโหมดตรวจจับ"
-            >
-              <button
-                type="button"
-                onclick="setBehaviorMode(true)"
-                id="behaviorModeBehaviorBtn"
-                class="flex-1 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 shadow-sm transition-colors sm:flex-none"
-                aria-pressed="true"
-              >
-                <span class="mr-1 text-xs font-bold">AI</span>
-                พฤติกรรม
-              </button>
-              <button
-                type="button"
-                onclick="setBehaviorMode(false)"
-                id="behaviorModeCountBtn"
-                class="flex-1 rounded-lg px-3 py-1.5 text-sm font-semibold text-white/85 transition-colors hover:bg-white/10 hover:text-white sm:flex-none"
-                aria-pressed="false"
-              >
-                <span class="mr-1 text-xs font-bold">คน</span>
-                นับคน
-              </button>
-            </div>
+          <div class="flex w-full sm:w-auto sm:justify-end">
             <div class="flex max-w-full items-center gap-2 text-sm text-white/90">
               <span id="authUserEmail" class="truncate"></span>
               <button
@@ -149,24 +123,60 @@
       <div id="labMenu">
         <div id="sessionHistoryView" class="space-y-6">
           <div class="flex flex-wrap items-center justify-between gap-3">
-            <h2 class="text-2xl font-bold text-gray-800">รอบวิเคราะห์</h2>
+            <h2 id="historyTitle" tabindex="-1" class="text-2xl font-bold text-gray-800">รอบวิเคราะห์</h2>
             <button type="button" id="showNewSessionBtn" onclick="showNewSessionForm()"
               class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium">
               สร้างรอบใหม่
             </button>
           </div>
-          <div id="sessionHistory" class="space-y-3"></div>
+          <div class="flex flex-wrap items-end gap-3">
+            <div class="min-w-0 flex-1 sm:max-w-md">
+              <label for="historySearch" class="mb-1.5 block text-sm font-medium text-gray-700">ค้นหารอบวิเคราะห์</label>
+              <input id="historySearch" type="search" placeholder="ชื่อรอบ รายวิชา ห้องเรียน หรือวันที่"
+                class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400" />
+            </div>
+            <button id="historyRefreshBtn" type="button" onclick="loadSessionHistory()" title="รีเฟรชประวัติ" aria-label="รีเฟรชประวัติ"
+              class="history-icon-button">&#8635;</button>
+          </div>
+          <p id="historyStatus" class="text-sm text-gray-500" role="status" aria-live="polite"></p>
+          <div class="relative overflow-x-auto border-y border-gray-200 bg-white">
+            <table class="history-table w-full min-w-[850px] text-left text-sm" aria-label="ประวัติรอบวิเคราะห์">
+              <thead class="bg-gray-100 text-gray-700">
+                <tr>
+                  <th scope="col" data-history-sort="name" aria-sort="none"><button type="button">ชื่อรอบ <span aria-hidden="true"></span></button></th>
+                  <th scope="col" data-history-sort="date" aria-sort="descending"><button type="button">วันที่ <span aria-hidden="true"></span></button></th>
+                  <th scope="col" data-history-sort="time" aria-sort="none"><button type="button">เวลา <span aria-hidden="true"></span></button></th>
+                  <th scope="col" data-history-sort="people" aria-sort="none" class="text-center"><button type="button">คนสูงสุด <span aria-hidden="true"></span></button></th>
+                  <th scope="col" data-history-sort="attention" aria-sort="none" class="text-right"><button type="button">ความตั้งใจเฉลี่ย <span aria-hidden="true"></span></button></th>
+                  <th scope="col" class="px-4 py-3">แหล่งภาพ</th>
+                  <th scope="col" class="px-4 py-3"><span class="sr-only">รายงาน</span></th>
+                </tr>
+              </thead>
+              <tbody id="sessionHistory" class="divide-y divide-gray-100"></tbody>
+            </table>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600">
+            <span id="historyResultCount" role="status" aria-live="polite"></span>
+            <div class="flex items-center gap-2">
+              <label for="historyPageSize">ต่อหน้า</label>
+              <select id="historyPageSize" class="rounded-md border border-gray-300 bg-white px-2 py-1.5">
+                <option value="10">10</option><option value="25">25</option><option value="50">50</option>
+              </select>
+              <button id="historyPreviousBtn" type="button" class="history-icon-button" title="หน้าก่อนหน้า" aria-label="หน้าก่อนหน้า">&#8592;</button>
+              <span id="historyPageNumber" class="min-w-12 text-center"></span>
+              <button id="historyNextBtn" type="button" class="history-icon-button" title="หน้าถัดไป" aria-label="หน้าถัดไป">&#8594;</button>
+            </div>
+          </div>
         </div>
 
-        <div id="newSessionFormSection" class="hidden space-y-6">
-          <div class="flex items-center gap-4">
-            <button type="button" onclick="showSessionHistory()" aria-label="กลับไปประวัติ"
-              class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg" title="กลับไปประวัติ">
-              ←
+        <dialog id="newSessionDialog" class="session-dialog" aria-labelledby="newSessionTitle">
+          <div class="flex items-center justify-between gap-4 border-b border-gray-200 px-6 py-4">
+            <h2 id="newSessionTitle" class="text-xl font-bold text-gray-800">สร้างรอบใหม่</h2>
+            <button type="button" onclick="closeNewSessionForm()" aria-label="ปิด" title="ปิด" class="history-icon-button">
+              &times;
             </button>
-            <h2 class="text-2xl font-bold text-gray-800">สร้างรอบใหม่</h2>
           </div>
-          <div class="max-w-2xl mx-auto bg-white rounded-xl shadow-lg p-6 space-y-5">
+          <form id="newSessionForm" class="p-6 space-y-5">
             <div>
               <label
                 for="sessionNameInput"
@@ -221,13 +231,13 @@
 
             <button
               id="startSessionBtn"
-              onclick="startSession()"
+              type="submit"
               class="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-lg transition-colors font-medium"
             >
               เริ่มวิเคราะห์
             </button>
-          </div>
-        </div>
+          </form>
+        </dialog>
       </div>
 
       <!-- Analysis Interface -->
@@ -239,58 +249,49 @@
             class="flex items-center space-x-2 bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors"
           >
             <span>←</span>
-            <span>เริ่มรอบใหม่</span>
+            <span>กลับไปประวัติ</span>
           </button>
-          <div class="text-right">
-            <h2
-              id="currentLabName"
-              class="text-2xl font-bold text-gray-800"
-            ></h2>
-            <p id="currentSessionMeta" class="text-gray-600"></p>
+          <div class="flex min-w-0 flex-wrap items-center gap-3 sm:justify-end">
+            <div class="min-w-0 break-words sm:text-right">
+              <h2
+                id="currentLabName"
+                tabindex="-1"
+                class="text-2xl font-bold text-gray-800"
+              ></h2>
+              <p id="currentSessionMeta" class="text-gray-600"></p>
+            </div>
+            <button id="analysisReportBtn" type="button" onclick="exportReport()"
+              class="shrink-0 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors">
+              ดูรายงาน
+            </button>
           </div>
         </div>
 
         <!-- Control Panel -->
-        <div class="bg-white rounded-xl shadow-lg p-6">
+        <div id="analysisControls" class="bg-white rounded-xl shadow-lg p-6">
           <div class="flex flex-wrap items-center justify-between gap-4">
-            <div class="flex items-center space-x-4">
-              <button
-                onclick="refreshData()"
-                class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center space-x-2"
-              >
-                <span>รีเฟรช</span>
-              </button>
-              <button
-                onclick="exportReport()"
-                class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center space-x-2"
-              >
-                <span>ดูรายงาน</span>
-              </button>
+            <div class="flex w-full rounded-lg border border-gray-200 bg-white p-1 sm:w-auto" role="group" aria-label="ประเภทแหล่งภาพ">
+              <button id="sourceModeVideoBtn" type="button" onclick="setSourceMode('video')"
+                class="flex-1 px-4 py-2 rounded-md text-sm font-medium sm:flex-none">วิดีโอ</button>
+              <button id="sourceModeWebcamBtn" type="button" onclick="setSourceMode('webcam')"
+                class="flex-1 px-4 py-2 rounded-md text-sm font-medium sm:flex-none">เว็บแคม</button>
             </div>
-            <div class="flex items-center space-x-4">
-              <div class="text-sm">
-                <span class="text-gray-600">สถานะ:</span>
-                <span id="connectionStatus" class="text-gray-500 font-medium"
-                  >รอแหล่งภาพ</span
-                >
-              </div>
-              <div class="text-sm">
-                <span class="text-gray-600">อัพเดทล่าสุด:</span>
-                <span id="lastUpdate" class="text-blue-600 font-medium"
-                  >ตอนนี้</span
-                >
-              </div>
+            <div class="flex w-full rounded-lg border border-gray-200 bg-white p-1 sm:w-auto" role="group" aria-label="เลือกโหมดตรวจจับ">
+              <button id="behaviorModeBehaviorBtn" type="button" onclick="setBehaviorMode(true)"
+                class="flex-1 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors sm:flex-none"
+                aria-pressed="true">
+                <span class="mr-1 text-xs font-bold">AI</span> พฤติกรรม
+              </button>
+              <button id="behaviorModeCountBtn" type="button" onclick="setBehaviorMode(false)"
+                class="flex-1 rounded-md bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-100 sm:flex-none"
+                aria-pressed="false">
+                <span class="mr-1 text-xs font-bold">คน</span> นับคน
+              </button>
             </div>
           </div>
 
           <!-- Video Source Config -->
           <div class="mt-4 pt-4 border-t border-gray-100 space-y-4">
-            <div class="inline-flex rounded-lg border border-gray-200 p-1" role="group" aria-label="ประเภทแหล่งภาพ">
-              <button id="sourceModeVideoBtn" type="button" onclick="setSourceMode('video')"
-                class="px-4 py-2 rounded-md text-sm font-medium">วิดีโอ</button>
-              <button id="sourceModeWebcamBtn" type="button" onclick="setSourceMode('webcam')"
-                class="px-4 py-2 rounded-md text-sm font-medium">เว็บแคม</button>
-            </div>
             <div id="webcamSourcePanel" class="hidden flex flex-wrap items-center gap-3">
               <select
                 id="webcamSelect"
@@ -314,10 +315,10 @@
               </button>
             </div>
             <div id="videoSourcePanel" class="flex flex-wrap items-end gap-3">
-              <div>
+              <div class="min-w-0 w-full sm:w-auto">
                 <label for="recordingStartInput" class="block text-sm font-medium text-gray-700 mb-1">วันที่และเวลาเริ่มบันทึก</label>
                 <input id="recordingStartInput" type="datetime-local"
-                  class="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white" />
+                  class="w-full min-w-0 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white" />
               </div>
               <input
                 type="file"
@@ -333,7 +334,19 @@
                 อัปโหลดคลิป
               </button>
             </div>
-            <span id="sourceStatus" class="text-xs text-gray-500">&#9675; รอเลือกเว็บแคมหรือคลิป</span>
+          </div>
+          <div class="mt-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-gray-100 pt-4">
+            <span id="sourceStatus" class="min-w-0 break-words text-xs text-gray-500">&#9675; รอเลือกเว็บแคมหรือคลิป</span>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+              <div>
+                <span class="text-gray-600">สถานะ:</span>
+                <span id="connectionStatus" class="text-gray-500 font-medium">รอแหล่งภาพ</span>
+              </div>
+              <div>
+                <span class="text-gray-600">อัพเดทล่าสุด:</span>
+                <span id="lastUpdate" class="text-blue-600 font-medium">ตอนนี้</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -342,10 +355,12 @@
           <!-- Camera Feed -->
           <div class="min-w-0 lg:col-span-2 space-y-4">
             <div class="bg-white rounded-xl shadow-lg p-6">
-              <div class="flex items-center justify-between mb-4">
+              <div class="flex items-center justify-between gap-3 mb-4">
                 <h3 class="text-lg font-semibold text-gray-800">
                   แหล่งภาพวิเคราะห์
                 </h3>
+                <button id="analysisRefreshBtn" type="button" onclick="refreshData()"
+                  title="รีเฟรชภาพและข้อมูล" aria-label="รีเฟรชภาพและข้อมูล" class="history-icon-button">&#8635;</button>
               </div>
 
               <!-- Camera Display -->
@@ -395,7 +410,7 @@
                 <h3 id="attentionChartTitle" class="text-lg font-semibold text-gray-800">
                   กราฟความตั้งใจเรียน (Real-time)
                 </h3>
-                <span id="attentionChartCadence" class="text-xs text-gray-500">อัปเดตทุก 2 วินาที</span>
+                <span id="attentionChartCadence" class="text-xs text-gray-500">สรุปผลทุก 30 วินาที</span>
               </div>
               <div class="h-48">
                 <canvas id="attentionChart"></canvas>
@@ -557,30 +572,28 @@
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- Report Modal -->
-    <div
-      id="reportModal"
-      class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50"
-    >
-      <div
-        class="bg-white rounded-xl shadow-2xl max-w-5xl w-full mx-4 max-h-[90vh] overflow-y-auto"
-      >
-        <div class="p-6">
-          <div class="flex items-center justify-between mb-6">
-            <h3 class="text-2xl font-bold text-gray-800">
-              รายงานรอบวิเคราะห์
-            </h3>
-            <button
-              id="reportCloseButton"
-              onclick="closeReportModal()"
-              class="text-gray-500 hover:text-gray-700 text-2xl"
-            >
-              &times;
-            </button>
+      <!-- Report Page -->
+      <section id="reportPage" class="hidden space-y-5" aria-labelledby="reportPageTitle">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <button id="reportBackButton" type="button" onclick="backFromReport()"
+            class="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-gray-700 hover:bg-gray-100">
+            <span aria-hidden="true">&#8592;</span><span id="reportBackLabel">กลับไปประวัติ</span>
+          </button>
+          <h2 id="reportPageTitle" tabindex="-1" class="text-xl font-bold text-gray-800 break-words">รายงานรอบวิเคราะห์</h2>
+        </div>
+        <p id="reportPageStatus" class="text-sm text-gray-600" role="status" aria-live="polite"></p>
+        <button id="reportRetryButton" type="button" onclick="retryReport()" class="hidden rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700">ลองอีกครั้ง</button>
+        <div id="reportDownloadActions" class="hidden">
+          <div class="grid grid-cols-2 gap-3 sm:flex sm:flex-wrap">
+            <button type="button" onclick="downloadReport('pdf')" class="bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-lg transition-colors">PDF</button>
+            <button type="button" onclick="downloadReport('excel')" class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg transition-colors">Excel</button>
+            <button type="button" onclick="downloadReport('csv')" class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-lg transition-colors">CSV</button>
+            <button type="button" onclick="downloadReport('json')" class="bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-lg transition-colors">JSON</button>
           </div>
-
+        </div>
+        <div id="reportContent" class="hidden report-content bg-white p-4 sm:p-6">
+          <h3 class="mb-5 text-xl font-bold text-gray-800">รายงานรอบวิเคราะห์</h3>
           <div class="space-y-6">
             <!-- ข้อมูลทั่วไป + สถิติ -->
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -691,45 +704,6 @@
                   >-%</span
                 >
               </div>
-            </div>
-
-            <div id="reportMethodologySection">
-              <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
-                <h4 class="font-semibold text-gray-800">
-                  เกณฑ์การวัดพฤติกรรมและข้อจำกัด
-                </h4>
-                <span id="reportMethodologyCaption" class="text-xs text-gray-500">
-                  อ้างอิงจากค่าที่ระบบใช้ในรอบนี้
-                </span>
-              </div>
-              <p id="reportAttentionFormula" class="mb-3 text-sm text-gray-600">
-                สูตรอัตราความตั้งใจ: -
-              </p>
-              <div
-                id="reportMethodologyTableWrapper"
-                class="overflow-x-auto border border-gray-200 rounded-lg"
-              >
-                <table class="w-full min-w-[980px] text-xs text-left">
-                  <thead class="bg-gray-100 text-gray-700">
-                    <tr>
-                      <th class="px-3 py-2 font-semibold">พฤติกรรม</th>
-                      <th class="px-3 py-2 font-semibold">สิ่งที่วัดและเกณฑ์ตัดสิน</th>
-                      <th class="px-3 py-2 font-semibold text-right">
-                        ยืนยันก่อนเปลี่ยนสถานะ
-                      </th>
-                      <th class="px-3 py-2 font-semibold">ข้อจำกัดเฉพาะ</th>
-                    </tr>
-                  </thead>
-                  <tbody
-                    id="reportMethodologyRows"
-                    class="divide-y divide-gray-100"
-                  ></tbody>
-                </table>
-              </div>
-              <ul
-                id="reportMethodologyLimitations"
-                class="mt-3 space-y-1 text-xs text-gray-600 list-disc pl-5"
-              ></ul>
             </div>
 
             <div id="reportTimelineSection" class="hidden">
@@ -853,45 +827,35 @@
               ></div>
             </div>
 
-            <div id="reportDownloadActions" class="space-y-3">
-              <div class="grid grid-cols-2 gap-3">
-                <button
-                  onclick="downloadReport('pdf')"
-                  class="bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-lg transition-colors flex items-center justify-center space-x-2"
-                >
-                  <span></span>
-                  <span>PDF</span>
-                </button>
-                <button
-                  onclick="downloadReport('excel')"
-                  class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg transition-colors flex items-center justify-center space-x-2"
-                >
-                  <span></span>
-                  <span>Excel</span>
-                </button>
-                <button
-                  onclick="downloadReport('csv')"
-                  class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-lg transition-colors flex items-center justify-center space-x-2"
-                >
-                  <span></span>
-                  <span>CSV</span>
-                </button>
-                <button
-                  onclick="downloadReport('json')"
-                  class="bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-lg transition-colors flex items-center justify-center space-x-2"
-                >
-                  <span></span>
-                  <span>JSON</span>
-                </button>
+            <details id="reportMethodologySection" class="border-t border-gray-200 pt-4">
+              <summary class="cursor-pointer py-2 font-semibold text-gray-800 focus-visible:outline-blue-600">เกณฑ์การวัดพฤติกรรมและข้อจำกัด</summary>
+              <div class="mt-3 space-y-3">
+                <p id="reportMethodologyCaption" class="text-xs text-gray-500">อ้างอิงจากค่าที่ระบบใช้ในรอบนี้</p>
+                <p id="reportAttentionFormula" class="text-sm text-gray-600">สูตรอัตราความตั้งใจ: -</p>
+                <div id="reportMethodologyTableWrapper" class="overflow-x-auto border border-gray-200 rounded-lg">
+                  <table class="w-full min-w-[980px] text-xs text-left">
+                    <thead class="bg-gray-100 text-gray-700">
+                      <tr>
+                        <th class="px-3 py-2 font-semibold">พฤติกรรม</th>
+                        <th class="px-3 py-2 font-semibold">สิ่งที่วัดและเกณฑ์ตัดสิน</th>
+                        <th class="px-3 py-2 font-semibold text-right">ยืนยันก่อนเปลี่ยนสถานะ</th>
+                        <th class="px-3 py-2 font-semibold">ข้อจำกัดเฉพาะ</th>
+                      </tr>
+                    </thead>
+                    <tbody id="reportMethodologyRows" class="divide-y divide-gray-100"></tbody>
+                  </table>
+                </div>
+                <ul id="reportMethodologyLimitations" class="space-y-1 text-xs text-gray-600 list-disc pl-5"></ul>
               </div>
-            </div>
+            </details>
           </div>
         </div>
-      </div>
+      </section>
     </div>
     <script src="auth.js" defer></script>
     <script src="report-pdf.js" defer></script>
     <script src="shared.js" defer></script>
+    <script src="session-history.js" defer></script>
     <!-- Toast notification container -->
     <div
       id="toastContainer"

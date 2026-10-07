@@ -36,6 +36,7 @@
   }
 
   function showLogin(message = "กรุณาเข้าสู่ระบบเพื่อใช้งาน") {
+    document.dispatchEvent(new Event("classmood:locked"));
     element("authGate")?.classList.remove("hidden");
     element("appHeader")?.classList.add("hidden");
     element("appContent")?.classList.add("hidden");

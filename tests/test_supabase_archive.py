@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from urllib.parse import parse_qs
 from unittest.mock import patch
 
 
@@ -97,7 +98,35 @@ class SupabaseArchiveTests(unittest.TestCase):
         ]):
             result = self.archive.list_sessions("teacher-id")
 
-        self.assertEqual(result, [{"id": "ready", "room_name": None, "course_name": None}])
+        self.assertEqual(result, [{
+            "id": "ready", "room_name": None, "course_name": None,
+            "report_total_people": None, "avg_attention_rate": None,
+        }])
+
+    def test_history_reads_lightweight_report_metrics_for_owned_sessions(self):
+        with patch.object(self.archive, "_table", side_effect=[
+            [{"id": "round-1"}, {"id": "round-2"}],
+            [
+                {"session_id": "round-1", "summary": {
+                    "total_records": 20, "report_total_people": 11,
+                    "max_people": 11, "latest_total_people": 3,
+                    "avg_attention_rate": 72.5,
+                }},
+                {"session_id": "round-2", "summary": {
+                    "total_records": 1, "max_people": 4, "avg_attention_rate": 0,
+                }},
+            ],
+        ]) as query:
+            result = self.archive.list_sessions("teacher-id")
+
+        self.assertEqual(result[0]["report_total_people"], 11)
+        self.assertEqual(result[0]["avg_attention_rate"], 72.5)
+        self.assertEqual(result[1]["report_total_people"], 4)
+        self.assertEqual(result[1]["avg_attention_rate"], 0)
+        params = parse_qs(query.call_args_list[1].args[1])
+        self.assertEqual(params["select"], ["session_id,summary:result_summary->summary"])
+        self.assertEqual(params["owner_id"], ["eq.teacher-id"])
+        self.assertEqual(params["session_id"], ["in.(round-1,round-2)"])
 
     def test_history_restores_room_and_course_names(self):
         sessions = [{"id": "ready", "room_id": 2, "course_id": 3}]

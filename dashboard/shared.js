@@ -375,8 +375,8 @@ function updateAnalysisCadence(sourceData = null) {
   setTextIfPresent(
     "attentionChartCadence",
     sampled
-      ? `สรุปทุก ${sourceData.sample_interval_seconds || 60} วินาทีของคลิป`
-      : "อัปเดตทุก 2 วินาที",
+      ? `สรุปทุก ${sourceData.sample_interval_seconds || currentAnalysisInterval} วินาทีของคลิป`
+      : `สรุปผลทุก ${currentAnalysisInterval} วินาที`,
   );
 }
 
@@ -588,9 +588,9 @@ function updateModeToggle() {
   const behaviorBtn = document.getElementById("behaviorModeBehaviorBtn");
   const countBtn = document.getElementById("behaviorModeCountBtn");
   const activeClass =
-    "flex-1 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 shadow-sm transition-colors sm:flex-none";
+    "flex-1 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors sm:flex-none";
   const inactiveClass =
-    "flex-1 rounded-lg px-3 py-1.5 text-sm font-semibold text-white/85 transition-colors hover:bg-white/10 hover:text-white sm:flex-none";
+    "flex-1 rounded-md bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-100 sm:flex-none";
 
   if (behaviorBtn) {
     behaviorBtn.className = useBehaviorMode ? activeClass : inactiveClass;
@@ -692,18 +692,6 @@ function recordingStartWithOffset(value) {
     + `${sign}${pad(Math.floor(magnitude / 60))}:${pad(magnitude % 60)}`;
 }
 
-function showNewSessionForm() {
-  document.getElementById("sessionHistoryView")?.classList.add("hidden");
-  document.getElementById("newSessionFormSection")?.classList.remove("hidden");
-  document.getElementById("sessionNameInput")?.focus();
-}
-
-function showSessionHistory() {
-  document.getElementById("newSessionFormSection")?.classList.add("hidden");
-  document.getElementById("sessionHistoryView")?.classList.remove("hidden");
-  document.getElementById("showNewSessionBtn")?.focus();
-}
-
 function normalizeAnalysisIntervalInput() {
   const input = document.getElementById("analysisIntervalInput");
   if (!input) return 30;
@@ -736,59 +724,9 @@ function setSourceMode(mode) {
     if (!button) continue;
     const active = type === selectedSourceMode;
     button.className = active
-      ? "px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white"
-      : "px-4 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100";
+      ? "flex-1 px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white sm:flex-none"
+      : "flex-1 px-4 py-2 rounded-md text-sm font-medium bg-white text-gray-700 hover:bg-gray-100 sm:flex-none";
     button.setAttribute("aria-pressed", String(active));
-  }
-}
-
-async function loadSessionHistory() {
-  const container = document.getElementById("sessionHistory");
-  if (!container) return;
-  try {
-    const response = await apiFetch("/api/sessions");
-    if (!response.ok) throw new Error("ไม่สามารถโหลดประวัติได้");
-    const payload = await response.json();
-    const sessions = payload.sessions || [];
-    container.replaceChildren();
-    if (!sessions.length) {
-      container.textContent = payload.archive_error
-        ? "เชื่อมข้อมูลบนคลาวด์ไม่ได้"
-        : "ยังไม่มีรอบวิเคราะห์ที่บันทึกไว้";
-      container.className = "text-sm text-gray-500";
-      showNewSessionForm();
-      return;
-    }
-    container.className = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3";
-    if (payload.archive_error) {
-      const warning = document.createElement("p");
-      warning.className = "text-sm text-amber-700 sm:col-span-2 lg:col-span-3";
-      warning.textContent = "เชื่อมข้อมูลบนคลาวด์ไม่ได้ กำลังแสดงรอบที่เก็บในเครื่อง";
-      container.append(warning);
-    }
-    for (const item of sessions) {
-      const card = document.createElement("article");
-      card.className = "bg-white border border-gray-200 rounded-lg p-4 space-y-2";
-      const title = document.createElement("h3");
-      title.className = "font-semibold text-gray-900 truncate";
-      title.textContent = item.name || item.id;
-      const details = document.createElement("p");
-      details.className = "text-sm text-gray-600";
-      details.textContent = `${item.course_name || "ไม่ระบุวิชา"} | ${item.room_name || "ไม่ระบุห้อง"}`;
-      const time = document.createElement("p");
-      time.className = "text-xs text-gray-500";
-      time.textContent = `${formatReportDateTime(item.recording_started_at)} · ${item.source_type === "video" ? "วิดีโอ" : "เว็บแคม"} · ${item.storage === "supabase" ? "บันทึกบนคลาวด์" : "บันทึกในเครื่อง"}`;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "text-sm font-medium text-blue-700 hover:underline";
-      button.textContent = item.status === "completed" ? "ดูรายงาน" : "ดูผลที่บันทึกไว้";
-      button.addEventListener("click", () => exportReport(item.id, item.name));
-      card.append(title, details, time, button);
-      container.append(card);
-    }
-  } catch (error) {
-    container.textContent = error.message;
-    container.className = "text-sm text-red-600";
   }
 }
 
@@ -856,6 +794,7 @@ function startSession() {
   }
   currentAnalysisInterval = interval;
   currentRecordingStart = "";
+  closeNewSessionForm();
   openAnalysisSession(makeSessionId(name), name);
 }
 
@@ -864,8 +803,7 @@ function openAnalysisSession(sessionId, sessionName) {
   currentSessionName = sessionName;
   currentCamera = 1;
 
-  document.getElementById("labMenu").classList.add("hidden");
-  document.getElementById("labInterface").classList.remove("hidden");
+  navigateApp("#analysis");
   document.getElementById("currentLabName").textContent = sessionName;
   setTextIfPresent(
     "currentSessionMeta",
@@ -882,7 +820,7 @@ function openAnalysisSession(sessionId, sessionName) {
 }
 
 // 🔙 กลับไปหน้าเริ่มต้น
-async function backToMenu() {
+async function backToMenu(updateRoute = true) {
   const sessionId = currentLab;
   const cameraId = currentCamera;
   if (sessionId && isStreamActive(sessionId, cameraId)) {
@@ -893,12 +831,10 @@ async function backToMenu() {
       if (!response.ok) throw new Error("ไม่สามารถหยุดรอบวิเคราะห์ได้");
     } catch (error) {
       showToast(error.message, "alert");
+      navigateApp("#analysis", { replace: true });
       return;
     }
   }
-  document.getElementById("labInterface").classList.add("hidden");
-  document.getElementById("labMenu").classList.remove("hidden");
-  showSessionHistory();
   currentLab = "";
   currentSessionName = "";
   currentRoomName = "";
@@ -914,6 +850,11 @@ async function backToMenu() {
   stopAlertPolling(); // 🔔 หยุดยิงฟังแจ้งเตือน
   resetDashboardState();
   resetRecordingStartInput();
+  if (updateRoute) navigateApp("#history");
+  else {
+    window.history.replaceState(null, "", "#history");
+    showSessionHistory();
+  }
   loadSessionHistory();
 }
 
@@ -936,6 +877,10 @@ function toggleDarkMode() {
 
 // 📦 ดาวน์โหลดรายงานในรูปแบบที่เลือก
 function downloadReport(format) {
+  if (!latestExportData) {
+    showToast("กรุณารอให้โหลดรายงานสำเร็จก่อน", "warning");
+    return;
+  }
   const labId = latestExportData?.lab_id || currentLab || "unknown";
   const fileName = `ClassMood_Report_${labId}_${Date.now()}`;
 
@@ -1366,48 +1311,41 @@ function refreshData() {
     new Date().toLocaleTimeString();
 }
 
-// 📊 เปิด modal และดึงข้อมูลจริงจาก backend
-async function exportReport(sessionId = currentLab, sessionName = currentSessionName) {
+// Load a report into its dedicated page; only the newest request may render.
+async function exportReport(sessionId = currentLab, sessionName = currentSessionName, updateRoute = true) {
   if (!sessionId) {
     alert("กรุณาเริ่มรอบวิเคราะห์ก่อน");
     return;
   }
 
-  const modal = document.getElementById("reportModal");
-  if (modal) modal.classList.remove("hidden");
+  if (updateRoute) return navigateApp(`#report/${encodeURIComponent(sessionId)}`);
+  reportSessionId = sessionId;
+  const request = ++reportRequestVersion;
+  latestExportData = null;
+  setTextIfPresent("reportPageTitle", sessionName || "รายงานรอบวิเคราะห์");
+  showAppView("report");
+  setTextIfPresent("reportBackLabel", reportReturnHash === "#analysis" ? "กลับไปหน้าวิเคราะห์" : "กลับไปประวัติ");
+  setTextIfPresent("reportPageStatus", "กำลังโหลดรายงาน...");
+  document.getElementById("reportPage").setAttribute("aria-busy", "true");
+  document.getElementById("reportContent").classList.add("hidden");
+  document.getElementById("reportDownloadActions").classList.add("hidden");
+  document.getElementById("reportRetryButton").classList.add("hidden");
+  document.getElementById("reportMethodologySection").open = false;
   renderReportTimeline([]);
   renderTrackingReport(null);
   renderBehaviorEvents(null);
   renderEvidenceReport(null);
   renderAnalysisMethodology(null);
 
-  // ชื่อรอบ
-  const labName = sessionName ||
-    document.getElementById("currentLabName")?.textContent || "ไม่ทราบรอบ";
-  const el = document.getElementById("reportLabName");
-  if (el) el.textContent = labName;
-
-  // วันที่/เวลา
-  const now = new Date();
-  const dateStr = now.toLocaleDateString("th-TH", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-  const timeStr = now.toLocaleTimeString("th-TH");
-  const dateEl = document.getElementById("reportDate");
-  const timeEl = document.getElementById("reportTime");
-  if (dateEl) dateEl.textContent = `วันที่: ${dateStr}`;
-  if (timeEl) timeEl.textContent = `เวลาส่งออก: ${timeStr}`;
-
   // ดึงข้อมูลจาก backend
   try {
     const res = await apiFetch(`/api/export/${encodeURIComponent(sessionId)}`);
     if (!res.ok) throw new Error("ไม่สามารถโหลดรายงานได้");
     const data = await res.json();
+    if (request !== reportRequestVersion) return;
     latestExportData = {
       ...data,
-      session_name: sessionName || data.session_name || data.lab_id,
+      session_name: data.session_name || data.tracking?.session?.name || sessionName || data.lab_id,
     };
 
     const s = latestExportData.summary || {};
@@ -1421,10 +1359,14 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
       if (el) el.textContent = text;
     };
 
+    set("reportPageTitle", latestExportData.session_name);
+    set("reportLabName", latestExportData.session_name);
+    set("reportDate", `วันที่คาบเรียน: ${session.recording_started_at ? new Date(session.recording_started_at).toLocaleDateString("th-TH", { year: "numeric", month: "long", day: "numeric" }) : "-"}`);
+    set("reportTime", `เวลาจัดทำรายงาน: ${formatReportDateTime(data.export_time)}`);
     set("reportRecords", `บันทึก: ${s.total_records ?? 0} รายการ`);
     set(
       "reportSessionContext",
-      `วิชา: ${session.course_name || currentCourseName || "ไม่ระบุ"} | ห้อง: ${session.room_name || currentRoomName || "ไม่ระบุ"}`,
+      `วิชา: ${session.course_name || "ไม่ระบุ"} | ห้อง: ${session.room_name || "ไม่ระบุ"}`,
     );
     set(
       "reportRecordingPeriod",
@@ -1470,7 +1412,11 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
     renderBehaviorEvents(tracking);
     renderEvidenceReport(tracking);
     renderAnalysisMethodology(methodology);
+    document.getElementById("reportContent").classList.remove("hidden");
+    document.getElementById("reportDownloadActions").classList.remove("hidden");
+    set("reportPageStatus", s.total_records ? "" : "รอบนี้ยังไม่มีข้อมูลการวิเคราะห์ที่บันทึกไว้");
   } catch (e) {
+    if (request !== reportRequestVersion) return;
     console.error("Error fetching export data:", e);
     latestExportData = null;
     renderReportTimeline([]);
@@ -1478,15 +1424,11 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
     renderBehaviorEvents(null);
     renderEvidenceReport(null);
     renderAnalysisMethodology(null);
-    const recEl = document.getElementById("reportRecords");
-    if (recEl) recEl.textContent = "ไม่สามารถโหลดข้อมูลได้";
+    setTextIfPresent("reportPageStatus", "ไม่สามารถโหลดรายงานได้ กรุณาลองอีกครั้ง");
+    document.getElementById("reportRetryButton").classList.remove("hidden");
+  } finally {
+    if (request === reportRequestVersion) document.getElementById("reportPage").setAttribute("aria-busy", "false");
   }
-}
-
-// ❌ ปิด modal
-function closeReportModal() {
-  const modal = document.getElementById("reportModal");
-  if (modal) modal.classList.add("hidden");
 }
 
 // ===== 📊 CHART FUNCTIONS =====
@@ -1733,13 +1675,6 @@ document.addEventListener("DOMContentLoaded", function () {
     setTextIfPresent("themeText", "โหมดสว่าง");
   }
 
-  const sessionInput = document.getElementById("sessionNameInput");
-  if (sessionInput) {
-    sessionInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") startSession();
-    });
-  }
-
   const intervalInput = document.getElementById("analysisIntervalInput");
   intervalInput?.addEventListener("change", normalizeAnalysisIntervalInput);
   intervalInput?.addEventListener("blur", normalizeAnalysisIntervalInput);
@@ -1747,8 +1682,6 @@ document.addEventListener("DOMContentLoaded", function () {
   resetRecordingStartInput();
   setSourceMode("video");
 });
-
-document.addEventListener("classmood:ready", loadSessionHistory);
 
 // =============================================
 // 🔔  Alert polling (แจ้งเตือนแบบ real-time)

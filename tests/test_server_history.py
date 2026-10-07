@@ -3,6 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 
@@ -18,8 +19,26 @@ class SessionApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
         import app_config
 
+        original_config = app_config.CONFIG
+        original_modules = {
+            name: sys.modules.get(name)
+            for name in ("server", "behavior_analyzer", "cv2")
+        }
+
+        def restore_module_state():
+            app_config.CONFIG = original_config
+            for name, module in original_modules.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        cls.addClassCleanup(restore_module_state)
+        # The API fixture needs its own server, even if another test imported it.
+        sys.modules.pop("server", None)
         app_config.CONFIG = app_config.load_config(cls.directory.name, {
             "SUPABASE_URL": "https://example.supabase.co",
             "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
@@ -53,13 +72,6 @@ class SessionApiTests(unittest.TestCase):
             )
             server.session_database.finish_session(session_id, duration_seconds=600)
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.directory.cleanup()
-        sys.modules.pop("server", None)
-        sys.modules.pop("behavior_analyzer", None)
-        sys.modules.pop("cv2", None)
-
     def setUp(self):
         with self.client.session_transaction() as browser_session:
             browser_session["auth_user"] = {"id": "teacher-a", "email": "teacher@example.com"}
@@ -80,6 +92,44 @@ class SessionApiTests(unittest.TestCase):
         self.assertEqual(own.status_code, 200)
         self.assertEqual(own.json["tracking"]["session"]["name"], "owned")
         self.assertEqual(foreign.status_code, 404)
+
+    def test_report_export_time_preserves_the_generation_instant(self):
+        generated_at = datetime(2026, 10, 7, 3, 0, 0, tzinfo=timezone.utc)
+        with patch.object(self.server, "datetime") as clock:
+            clock.now.return_value = generated_at
+            response = self.client.get("/api/export/owned")
+
+        self.assertEqual(response.status_code, 200)
+        exported_at = datetime.fromisoformat(response.json["export_time"])
+        self.assertIsNotNone(exported_at.tzinfo)
+        self.assertEqual(exported_at, generated_at)
+        clock.now.assert_called_once_with(timezone.utc)
+
+    def test_history_metrics_use_whole_round_not_final_frame(self):
+        history = [
+            {"total_people": 11, "attention_rate": 80},
+            {"total_people": 3, "attention_rate": 60},
+        ]
+        with patch.dict(self.server.stats_history, {"owned": history}):
+            item = self.client.get("/api/sessions").json["sessions"][0]
+        self.assertEqual(item["report_total_people"], 11)
+        self.assertEqual(item["avg_attention_rate"], 70)
+
+    def test_history_without_observations_has_no_measurements(self):
+        with patch.dict(self.server.stats_history, {"owned": []}):
+            item = self.client.get("/api/sessions").json["sessions"][0]
+        self.assertIsNone(item["report_total_people"])
+        self.assertIsNone(item["avg_attention_rate"])
+
+    def test_history_prefers_archived_metrics_for_existing_local_round(self):
+        archive = types.SimpleNamespace(list_sessions=lambda owner: [{
+            "id": "owned", "report_total_people": 11, "avg_attention_rate": 72.5,
+        }])
+        with patch.object(self.server, "supabase_archive", archive):
+            item = self.client.get("/api/sessions").json["sessions"][0]
+        self.assertEqual(item["storage"], "supabase")
+        self.assertEqual(item["report_total_people"], 11)
+        self.assertEqual(item["avg_attention_rate"], 72.5)
 
     def test_completed_report_prefers_cloud_copy_and_falls_back_to_local(self):
         archive = types.SimpleNamespace(get_report=lambda owner, session_id: {

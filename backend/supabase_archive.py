@@ -7,6 +7,9 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
+_HISTORY_JOB_BATCH_SIZE = 20
+
+
 class ArchiveError(Exception):
     pass
 
@@ -206,17 +209,21 @@ class SupabaseArchive:
         sessions = self._table("class_sessions", params) or []
         if not sessions:
             return []
-        job_params = urlencode({
-            "select": "session_id,summary:result_summary->summary",
-            "owner_id": f"eq.{owner_id}",
-            "session_id": f"in.({','.join(item['id'] for item in sessions)})",
-            "status": "eq.completed",
-            "limit": "1000",
-        })
-        summaries = {
-            item["session_id"]: item.get("summary") or {}
-            for item in self._table("analysis_jobs", job_params) or []
-        }
+        summaries = {}
+        # Keep long session IDs below common proxy request-line limits.
+        for index in range(0, len(sessions), _HISTORY_JOB_BATCH_SIZE):
+            batch = sessions[index:index + _HISTORY_JOB_BATCH_SIZE]
+            job_params = urlencode({
+                "select": "session_id,summary:result_summary->summary",
+                "owner_id": f"eq.{owner_id}",
+                "session_id": f"in.({','.join(item['id'] for item in batch)})",
+                "status": "eq.completed",
+                "limit": str(len(batch)),
+            })
+            summaries.update({
+                item["session_id"]: item.get("summary") or {}
+                for item in self._table("analysis_jobs", job_params) or []
+            })
         completed = [item for item in sessions if item["id"] in summaries]
         for item in completed:
             summary = summaries[item["id"]]

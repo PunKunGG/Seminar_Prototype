@@ -1,5 +1,5 @@
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import ipaddress
 import json
 import math
@@ -1777,7 +1777,7 @@ def _build_export_data(lab_id):
             (tracking_report.get("session") or {}).get("name")
             or _session_label(lab_id)
         ),
-        "export_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "export_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "summary": report_summary,
         "period_seconds": 300 if periods else None,
         "periods": periods,

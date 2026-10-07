@@ -3,6 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 
@@ -91,6 +92,18 @@ class SessionApiTests(unittest.TestCase):
         self.assertEqual(own.status_code, 200)
         self.assertEqual(own.json["tracking"]["session"]["name"], "owned")
         self.assertEqual(foreign.status_code, 404)
+
+    def test_report_export_time_preserves_the_generation_instant(self):
+        generated_at = datetime(2026, 10, 7, 3, 0, 0, tzinfo=timezone.utc)
+        with patch.object(self.server, "datetime") as clock:
+            clock.now.return_value = generated_at
+            response = self.client.get("/api/export/owned")
+
+        self.assertEqual(response.status_code, 200)
+        exported_at = datetime.fromisoformat(response.json["export_time"])
+        self.assertIsNotNone(exported_at.tzinfo)
+        self.assertEqual(exported_at, generated_at)
+        clock.now.assert_called_once_with(timezone.utc)
 
     def test_history_metrics_use_whole_round_not_final_frame(self):
         history = [

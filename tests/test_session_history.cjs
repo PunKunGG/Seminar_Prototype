@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
@@ -128,4 +129,28 @@ test("screen polling stays at two seconds independently of the summary interval"
   context.clearInterval = () => {};
   vm.runInContext("currentAnalysisInterval = 60; updateLiveFeed = () => {}; updateCharts = () => {}; startLiveFeed(); startChartUpdates()", context);
   assert.deepEqual(delays, [2000, 2000]);
+});
+
+test("report timestamps show the same instant in each browser timezone", () => {
+  const sharedPath = path.join(__dirname, "..", "dashboard", "shared.js");
+  const script = `
+    const fs = require('node:fs');
+    const vm = require('node:vm');
+    const context = vm.createContext({
+      document: { addEventListener() {} },
+      window: { location: { protocol: 'http:', origin: 'http://localhost' } },
+    });
+    vm.runInContext(fs.readFileSync(${JSON.stringify(sharedPath)}, 'utf8'), context);
+    console.log(vm.runInContext('formatReportDateTime("2026-10-07T03:00:00+00:00")', context));
+  `;
+  for (const [timezone, expectedTime] of [
+    ["UTC", "03:00:00"],
+    ["Asia/Bangkok", "10:00:00"],
+    ["America/New_York", "23:00:00"],
+  ]) {
+    const result = execFileSync(process.execPath, ["-e", script], {
+      env: { ...process.env, TZ: timezone }, encoding: "utf8",
+    }).trim();
+    assert.ok(result.includes(expectedTime), `${timezone}: ${result}`);
+  }
 });

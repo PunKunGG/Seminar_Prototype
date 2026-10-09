@@ -105,6 +105,53 @@ class SessionApiTests(unittest.TestCase):
         self.assertEqual(exported_at, generated_at)
         clock.now.assert_called_once_with(timezone.utc)
 
+    def test_new_report_and_history_use_qualified_time_but_keep_raw_people(self):
+        from person_tracking import SessionTracker
+        from report_qualification import REPORT_POLICY
+
+        database = self.server.session_database
+        session_id = "new-policy-test"
+        database.upsert_session(session_id, name="Qualified", owner_id="teacher-a",
+                                room_name="Lab", course_name="AI", source_type="video",
+                                source_label="clip.mp4", report_policy=REPORT_POLICY)
+        self.addCleanup(lambda: self._delete_test_session(session_id))
+        tracker = SessionTracker(record_observed_segments=True, observation_step_seconds=1,
+                                 max_observation_gap_seconds=2)
+        for timestamp in range(61):
+            tracker.update([{"bbox": [0, 0, 100, 200], "behavior": "attentive"}], timestamp=timestamp)
+        tracker.update([], timestamp=61)
+        for timestamp in range(62, 72):
+            tracker.update([{"bbox": [0, 0, 100, 200], "behavior": "attentive"}], timestamp=timestamp)
+        database.sync_tracking(session_id, tracker.persistence_snapshot())
+        history = [{"total_people": 11, "attention_rate": 70}, {"total_people": 3, "attention_rate": 30}]
+        with patch.dict(self.server.stats_history, {session_id: history}):
+            report = self.client.get(f"/api/export/{session_id}").json
+            item = next(item for item in self.client.get("/api/sessions").json["sessions"] if item["id"] == session_id)
+        self.assertEqual(report["report_policy"], REPORT_POLICY)
+        self.assertEqual(report["raw_summary"]["avg_attention_rate"], 50)
+        self.assertEqual(report["summary"]["report_total_people"], 11)
+        self.assertEqual(report["qualified_analysis"]["summary"]["qualified_seconds"], 60)
+        self.assertEqual(report["summary"]["avg_attention_rate"], 100)
+        self.assertEqual(item["avg_attention_rate"], 100)
+        self.assertEqual(len(report["tracking"]["events"]), 2)
+        self.assertEqual(len(report["qualified_analysis"]["events"]), 1)
+        self.assertNotIn("report_policy", self.client.get("/api/export/owned").json)
+
+    def _delete_test_session(self, session_id):
+        with self.server.session_database._connection() as connection:
+            connection.execute("DELETE FROM class_sessions WHERE id = ?", (session_id,))
+
+    def test_tracker_factory_enables_new_policy_only_for_new_rounds(self):
+        from report_qualification import REPORT_POLICY
+
+        for processing_mode in ("realtime", "sampled"):
+            for new_policy in (False, True):
+                with self.subTest(mode=processing_mode, new_policy=new_policy):
+                    metadata = {"processing_mode": processing_mode, "report_policy": REPORT_POLICY if new_policy else None}
+                    tracker = self.server._new_session_tracker(metadata)
+                    self.assertEqual(tracker.persistent_positions, new_policy)
+                    self.assertEqual(tracker.record_observed_segments, new_policy)
+
     def test_history_metrics_use_whole_round_not_final_frame(self):
         history = [
             {"total_people": 11, "attention_rate": 80},

@@ -177,11 +177,15 @@ class SessionDatabase:
                 ("owner_id", "TEXT"),
                 ("recording_ended_at", "TEXT"),
                 ("analysis_interval_seconds", "INTEGER NOT NULL DEFAULT 30"),
+                ("report_policy_json", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(
                         f"ALTER TABLE class_sessions ADD COLUMN {name} {definition}"
                     )
+            event_columns = {row["name"] for row in connection.execute("PRAGMA table_info(behavior_events)")}
+            if "observed_segments_json" not in event_columns:
+                connection.execute("ALTER TABLE behavior_events ADD COLUMN observed_segments_json TEXT NOT NULL DEFAULT '[]'")
 
     def _catalog_id(self, connection, table, name):
         clean_name = _clean_text(name, "ไม่ระบุ", 100)
@@ -208,6 +212,7 @@ class SessionDatabase:
         analysis_interval_seconds=30,
         recording_started_at=None,
         reset_tracking=False,
+        report_policy=None,
     ):
         session_id = _clean_text(session_id, max_length=160)
         if not session_id:
@@ -253,6 +258,11 @@ class SessionDatabase:
                     "DELETE FROM session_tracks WHERE session_id = ?",
                     (session_id,),
                 )
+            if report_policy is not None:
+                connection.execute(
+                    "UPDATE class_sessions SET report_policy_json = ? WHERE id = ?",
+                    (json.dumps(report_policy), session_id),
+                )
 
     def sync_tracking(self, session_id, tracks):
         if not tracks:
@@ -297,15 +307,16 @@ class SessionDatabase:
                         INSERT INTO behavior_events(
                             session_id, track_id, event_index, behavior,
                             start_seconds, end_seconds, duration_seconds,
-                            avg_confidence
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            avg_confidence, observed_segments_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(session_id, track_id, event_index)
                         DO UPDATE SET
                             behavior = excluded.behavior,
                             start_seconds = excluded.start_seconds,
                             end_seconds = excluded.end_seconds,
                             duration_seconds = excluded.duration_seconds,
-                            avg_confidence = excluded.avg_confidence
+                            avg_confidence = excluded.avg_confidence,
+                            observed_segments_json = excluded.observed_segments_json
                         """,
                         (
                             session_id,
@@ -316,6 +327,7 @@ class SessionDatabase:
                             event["end_seconds"],
                             event["duration_seconds"],
                             event["avg_confidence"],
+                            json.dumps(event.get("observed_segments", [])),
                         ),
                     )
                 for bucket in track.get("buckets", []):
@@ -457,6 +469,7 @@ class SessionDatabase:
                     if table == "session_tracks":
                         item["active"] = bool(item["active"])
                     item.pop("created_at", None)
+                    item.pop("observed_segments_json", None)
                 tables[table] = items
             return tables
 
@@ -474,6 +487,7 @@ class SessionDatabase:
                 sessions.recording_started_at,
                 sessions.recording_ended_at,
                 sessions.analysis_interval_seconds,
+                sessions.report_policy_json,
                 sessions.created_at,
                 sessions.ended_at,
                 sessions.status
@@ -484,7 +498,11 @@ class SessionDatabase:
             """,
             (session_id,),
         ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        result = dict(row)
+        result["report_policy"] = json.loads(result.pop("report_policy_json") or "null")
+        return result
 
     def _empty_totals(self):
         return {
@@ -686,6 +704,8 @@ class SessionDatabase:
                     float(row["avg_confidence"]),
                     1,
                 ),
+                "observed_duration_seconds": float(row["duration_seconds"]),
+                "observed_segments": json.loads(row["observed_segments_json"]),
             }
             for row in event_rows
         ]
@@ -733,13 +753,23 @@ class SessionDatabase:
             evidence.append(item)
 
         representative_evidence = []
+        portraits = {item["track_id"]: item for item in evidence if item["evidence_key"] == "portrait"}
         represented_tracks = set()
         for item in evidence:
             track_id = item["track_id"]
+            if item["evidence_key"] == "portrait":
+                continue
             if track_id in represented_tracks:
                 continue
             represented_tracks.add(track_id)
-            representative_evidence.append(dict(item))
+            representative_evidence.append({
+                **item,
+                "thumbnail_filename": portraits.get(track_id, {}).get("filename"),
+            })
+        for track_id, item in portraits.items():
+            if track_id not in represented_tracks:
+                representative_evidence.append({**item, "thumbnail_filename": item["filename"]})
+        representative_evidence.sort(key=lambda item: item["track_id"])
 
         return {
             "session": metadata,

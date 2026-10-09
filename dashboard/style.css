@@ -471,7 +471,29 @@ body:has(.session-dialog[open]) { overflow: hidden; }
 .report-content.pdf-report { padding: 24px; }
 .report-content.pdf-report .grid-cols-2,
 .report-content.pdf-report .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.report-content.pdf-report #reportEvidenceGallery { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.report-portrait {
+  display: inline-flex;
+  position: relative;
+  width: 80px;
+  height: 80px;
+  padding: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 0;
+  box-shadow: 0 0 0 1px #d1d5db;
+  border-radius: 4px;
+  background: #f3f4f6;
+  vertical-align: middle;
+}
+.report-portrait img { position: absolute; inset: 0; width: 80px; height: 80px; object-fit: contain; }
+.report-portrait img[hidden] { display: none; }
+.evidence-placeholder { display: flex; align-items: center; justify-content: center; width: 100%; color: #6b7280; font-size: 11px; font-weight: normal; }
+.report-portrait:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.evidence-dialog { width: min(52rem, calc(100% - 2rem)); }
+.evidence-full-image { width: 100%; max-height: calc(100dvh - 8rem); object-fit: contain; background: #f3f4f6; }
+#reportTrackingRows td { vertical-align: middle; }
+#reportTrackingTableWrapper th:nth-child(3),
+#reportTrackingRows td:nth-child(3) { min-width: 88px; white-space: nowrap; }
 .pdf-report .sm\:flex-row { flex-direction: row; }
 .pdf-report .sm\:items-end { align-items: flex-end; }
 .pdf-report .sm\:justify-between { justify-content: space-between; }

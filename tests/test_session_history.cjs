@@ -24,6 +24,63 @@ function sortedIds(context, sessions, settings) {
   return Array.from(vm.runInContext("filterAndSortSessions(testState).map(item => item.id)", context));
 }
 
+test("qualified report helpers preserve raw evidence and people but use eligible minutes", () => {
+  const { context } = dashboardContext();
+  context.reportFixture = {
+    tracking: { session: { name: "Round" }, tracks: [{ track_id: 1, attention_rate: 50 }],
+      representative_evidence: [{ track_id: 1, url: "/api/evidence/round/ref.jpg", filename: "ref.jpg" }] },
+    periods: [{ start_seconds: 0, label: "09:00 - 09:05", avg_people: 11, avg_attention_rate: 70, summary: { sleeping: 3 } }],
+    qualified_analysis: {
+      summary: { behavior_seconds: { attentive: 60, sleeping: 30 } },
+      tracks: [{ track_id: 1, attention_rate: 66.7, qualified_seconds: 90 }], events: [],
+      periods: [{ start_seconds: 0, attention_rate: 66.7, behavior_seconds: { attentive: 60, sleeping: 30 } }],
+    },
+  };
+  vm.runInContext("latestExportData = reportFixture", context);
+  assert.equal(vm.runInContext("reportTrackingData().representative_evidence[0].filename", context), "ref.jpg");
+  assert.equal(vm.runInContext("reportTrackingData().tracks[0].attention_rate", context), 66.7);
+  assert.equal(vm.runInContext("reportPeriodData()[0].avg_people", context), 11);
+  assert.equal(vm.runInContext("reportPeriodData()[0].summary.sleeping", context), 30);
+  assert.equal(vm.runInContext("getReportBehavior().sleeping", context), 0.5);
+  assert.equal(vm.runInContext("formatAttention(null)", context), "-");
+});
+
+test("legacy reports keep their results while portraits share the ID cell", () => {
+  const { context, elements } = dashboardContext();
+  elements.reportTrackingSection = { classList: { toggle() {} } };
+  elements.reportTrackingRows = { innerHTML: "" };
+  elements.reportTrackingCaption = {};
+  context.reportFixture = { tracks: [{ track_id: 2, visible_seconds: 1, attention_rate: 80, behavior_seconds: {} }],
+    representative_evidence: [{ track_id: 2, url: "/api/evidence/round/ref.jpg" }] };
+  vm.runInContext("renderTrackingReport(reportFixture)", context);
+  assert.match(elements.reportTrackingRows.innerHTML, /width="80" height="80"/);
+  assert.match(elements.reportTrackingRows.innerHTML, /ID 2/);
+  assert.match(elements.reportTrackingRows.innerHTML, /80%/);
+  assert.match(elements.reportTrackingRows.innerHTML, /data-evidence-url/);
+  assert.doesNotMatch(elements.reportTrackingRows.innerHTML, /ผ่านเกณฑ์/);
+});
+
+test("CSV and Excel use the same qualified results and image filename in each ID row", () => {
+  const { context } = dashboardContext();
+  context.reportFixture = {
+    lab_id: "round", summary: { total_records: 2, avg_people: 11, max_people: 11, report_total_people: 11, avg_attention_rate: 100 },
+    tracking: { session: { name: "Round" }, tracks: [], events: [],
+      representative_evidence: [{ track_id: 1, filename: "ref.jpg", thumbnail_filename: "portrait.jpg", url: "/api/evidence/round/ref.jpg" }] },
+    report_policy: { minimum_behavior_seconds: 30 }, periods: [], history: [{ time: "raw", attention_rate: 0 }],
+    qualified_analysis: { summary: { behavior_seconds: { attentive: 60, sleeping: 0 } },
+      tracks: [{ track_id: 1, visible_seconds: 65, qualified_seconds: 60, attention_rate: 100,
+        behavior_seconds: { attentive: 60 }, event_counts: { attentive: 1 } }], events: [], periods: [] },
+  };
+  vm.runInContext("latestExportData = reportFixture; downloadBlob = value => { capturedExport = value; }", context);
+  for (const format of ["csv", "excel"]) {
+    vm.runInContext(`downloadReport("${format}")`, context);
+    assert.match(context.capturedExport, /portrait\.jpg/);
+    assert.match(context.capturedExport, /ตั้งใจเรียน \(นาทีรวม\)/);
+    assert.match(context.capturedExport, /เวลาที่ผ่านเกณฑ์/);
+    assert.doesNotMatch(context.capturedExport, /ข้อมูลย้อนหลัง|ภาพอ้างอิงและพฤติกรรมรายตำแหน่ง/);
+  }
+});
+
 test("people and attention sort numerically with missing measurements last", () => {
   const { context } = dashboardContext();
   const sessions = [

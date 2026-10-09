@@ -46,7 +46,7 @@ def _clean_bbox(value):
         x1, y1, x2, y2 = (float(item) for item in value)
     except (TypeError, ValueError):
         return None
-    if x2 <= x1 or y2 <= y1:
+    if not all(math.isfinite(item) for item in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
         return None
     return (x1, y1, x2, y2)
 
@@ -107,12 +107,21 @@ class BehaviorEvent:
     duration_seconds: float = 0.0
     confidence_total: float = 0.0
     observations: int = 0
+    observed_segments: list = field(default_factory=list)
 
-    def add_observation(self, timestamp, duration, confidence):
+    def add_observation(self, timestamp, duration, confidence, record_segments=False):
         self.end_seconds = max(self.end_seconds, timestamp)
         self.duration_seconds += max(0.0, duration)
         self.confidence_total += max(0.0, float(confidence or 0))
         self.observations += 1
+        if record_segments and duration > 0:
+            start = max(0.0, timestamp - duration)
+            if self.observed_segments and start <= self.observed_segments[-1][1] + 1e-8:
+                segment = self.observed_segments[-1]
+                segment[1] = timestamp
+                segment[2] += duration
+            else:
+                self.observed_segments.append([start, timestamp, duration])
 
     def to_dict(self):
         confidence = (
@@ -125,8 +134,9 @@ class BehaviorEvent:
             "behavior": self.behavior,
             "start_seconds": round(self.start_seconds, 3),
             "end_seconds": round(self.end_seconds, 3),
-            "duration_seconds": round(self.duration_seconds, 3),
+            "duration_seconds": self.duration_seconds,
             "avg_confidence": round(confidence, 1),
+            "observed_segments": [list(segment) for segment in self.observed_segments],
         }
 
 
@@ -147,6 +157,9 @@ class TrackState:
     active: bool = True
     position_bbox: tuple | None = None
     position_samples: int = 0
+    position_anchor: tuple | None = None
+    position_scale: float = 1.0
+    observed_last_update: bool = True
 
     def current_event(self):
         return self.events[-1] if self.events else None
@@ -169,6 +182,8 @@ class SessionTracker:
         position_memory_seconds=21600,
         max_position_distance=0.45,
         require_contiguous_transitions=False,
+        persistent_positions=False,
+        record_observed_segments=False,
     ):
         self.max_missing_seconds = max(0.1, float(max_missing_seconds))
         self.observation_step_seconds = max(
@@ -197,6 +212,10 @@ class SessionTracker:
         self.require_contiguous_transitions = bool(
             require_contiguous_transitions
         )
+        self.persistent_positions = bool(persistent_positions and position_matching)
+        self.record_observed_segments = bool(record_observed_segments)
+        self._pending_positions = []
+        self._ambiguous_positions = set()
         self._tracks = {}
         self._next_track_id = 1
         self._origin = time.monotonic()
@@ -239,6 +258,11 @@ class SessionTracker:
 
     def _observation_duration(self, track, timestamp):
         elapsed = timestamp - track.last_seen
+        if self.record_observed_segments and (
+            elapsed <= 0 or elapsed > self.max_observation_gap_seconds
+            or not track.observed_last_update
+        ):
+            return 0.0
         if elapsed <= 0 or elapsed > self.max_observation_gap_seconds:
             return self.observation_step_seconds
         return elapsed
@@ -253,7 +277,7 @@ class SessionTracker:
         bucket["behavior_seconds"][behavior] += duration
         event = track.current_event()
         if event is not None:
-            event.add_observation(timestamp, duration, confidence)
+            event.add_observation(timestamp, duration, confidence, self.record_observed_segments)
 
     def _update_behavior(self, track, observed_behavior, timestamp):
         observed = (
@@ -313,6 +337,8 @@ class SessionTracker:
                 observed_behavior if behavior != observed_behavior else None
             ),
             pending_since=timestamp if behavior != observed_behavior else None,
+            position_anchor=tuple(detection["position_anchor"]) if detection.get("position_anchor") else None,
+            position_scale=float(detection.get("position_scale") or 1),
         )
         self._next_track_id += 1
         self._tracks[track.track_id] = track
@@ -325,6 +351,8 @@ class SessionTracker:
         return track
 
     def _update_position(self, track, detection):
+        if self.persistent_positions:
+            return
         if detection.get("behavior") == "standing":
             return
         if track.position_bbox is None:
@@ -343,6 +371,8 @@ class SessionTracker:
         track.position_samples = min(20, track.position_samples + 1)
 
     def _match(self, detections, timestamp):
+        if self.persistent_positions:
+            return self._match_positions(detections, timestamp)
         candidates = []
         for track in self._tracks.values():
             missing_seconds = timestamp - track.last_seen
@@ -406,6 +436,76 @@ class SessionTracker:
             used_detections.add(detection_index)
         return matches
 
+    def _position_distance(self, track, detection):
+        anchor = detection.get("position_anchor")
+        if anchor is None or track.position_anchor is None:
+            return None
+        return math.dist(track.position_anchor, anchor) / max(
+            0.001, track.position_scale, float(detection.get("position_scale") or 0),
+        )
+
+    def _match_positions(self, detections, timestamp):
+        candidates = []
+        self._ambiguous_positions = set()
+        for index, detection in enumerate(detections):
+            ranked = []
+            for track in self._tracks.values():
+                distance = self._position_distance(track, detection)
+                if distance is not None and distance <= self.max_position_distance:
+                    ranked.append((distance, track.track_id))
+                elif (distance is None and track.active
+                      and timestamp - track.last_seen <= self.max_missing_seconds
+                      and _bbox_iou(track.bbox, detection["bbox"]) >= 0.5):
+                    ranked.append((self.max_position_distance + 1, track.track_id))
+            ranked.sort()
+            if len(ranked) > 1 and ranked[1][0] - ranked[0][0] <= max(0.01, ranked[1][0] * 0.1):
+                self._ambiguous_positions.add(index)
+                continue
+            if ranked:
+                candidates.append((ranked[0][0], ranked[0][1], index))
+        matches = {}
+        used = set()
+        for _, track_id, index in sorted(candidates):
+            if track_id not in used:
+                matches[index] = self._tracks[track_id]
+                used.add(track_id)
+        return matches
+
+    def _confirm_position(self, detection, timestamp, used_pending):
+        anchor = detection.get("position_anchor")
+        if anchor is None:
+            return False
+        if any(
+            (distance := self._position_distance(track, detection)) is not None
+            and distance <= 0.1
+            for track in self._tracks.values()
+        ):
+            return False
+        scale = max(0.001, float(detection.get("position_scale") or 0.001))
+        candidates = [
+            (math.dist(item["anchor"], anchor) / max(scale, item["scale"]), index)
+            for index, item in enumerate(self._pending_positions)
+            if index not in used_pending
+        ]
+        candidates.sort()
+        if candidates and candidates[0][0] <= 0.1:
+            index = candidates[0][1]
+            pending = self._pending_positions[index]
+            elapsed = timestamp - pending["last_seen"]
+            pending["observed_seconds"] += (
+                elapsed if 0 < elapsed <= self.max_observation_gap_seconds
+                else 0
+            )
+            pending["last_seen"] = timestamp
+            used_pending.add(index)
+            return pending["observed_seconds"] + 1e-9 >= 3.0
+        self._pending_positions.append({
+            "anchor": tuple(anchor), "scale": scale,
+            "last_seen": timestamp, "observed_seconds": 0.0,
+        })
+        used_pending.add(len(self._pending_positions) - 1)
+        return False
+
     def update(self, detections, timestamp=None):
         timestamp = self._timestamp(timestamp)
         prepared = []
@@ -420,12 +520,27 @@ class SessionTracker:
         with self._lock:
             matches = self._match(prepared, timestamp)
             enriched = []
+            used_pending = set()
             for detection_index, detection in enumerate(prepared):
                 track = matches.get(detection_index)
+                if track is None and self.persistent_positions and (
+                    detection_index in self._ambiguous_positions
+                    or not self._confirm_position(detection, timestamp, used_pending)
+                ):
+                    enriched.append({
+                        **detection, "raw_behavior": detection.get("behavior", "unknown"),
+                        "track_id": None, "track_attention_rate": 0,
+                        "is_new_track": False, "reacquired": False,
+                        "event_started": False, "event_index": None,
+                    })
+                    continue
                 is_new_track = track is None
                 reacquired = (
                     track is not None
-                    and timestamp - track.last_seen > self.max_missing_seconds
+                    and (
+                        not track.observed_last_update if self.record_observed_segments
+                        else timestamp - track.last_seen > self.max_missing_seconds
+                    )
                 )
                 event_started = is_new_track
                 if track is None:
@@ -461,6 +576,7 @@ class SessionTracker:
                     track.bbox = detection["bbox"]
                     track.last_seen = timestamp
                     track.active = True
+                    track.observed_last_update = True
                     self._update_position(track, detection)
                 else:
                     self._record_observation(
@@ -476,6 +592,7 @@ class SessionTracker:
                     track.bbox = detection["bbox"]
                     track.last_seen = timestamp
                     track.active = True
+                    track.observed_last_update = True
                     self._update_position(track, detection)
 
                 item = dict(detection)
@@ -497,11 +614,24 @@ class SessionTracker:
                 for item in enriched
             }
             for track in self._tracks.values():
+                if track.track_id not in matched_ids:
+                    track.observed_last_update = False
                 if (
                     track.track_id not in matched_ids
                     and timestamp - track.last_seen > self.max_missing_seconds
                 ):
                     track.active = False
+
+            self._pending_positions = [
+                item for index, item in enumerate(self._pending_positions)
+                if index in used_pending
+                and timestamp - item["last_seen"] <= self.max_missing_seconds
+                and not any(
+                    track.position_anchor is not None
+                    and math.dist(item["anchor"], track.position_anchor) / max(item["scale"], track.position_scale) <= 0.1
+                    for track in self._tracks.values()
+                )
+            ]
 
             return {
                 "detections": enriched,

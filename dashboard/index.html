@@ -618,6 +618,7 @@
                 <p class="text-sm text-blue-600" id="reportAnalysisMode">
                   รูปแบบการวิเคราะห์: -
                 </p>
+                <p class="text-xs text-gray-600 mt-2" id="reportPolicyCaption"></p>
               </div>
               <div class="bg-green-50 p-4 rounded-lg">
                 <h4 class="font-semibold text-green-800">สถิติการใช้งาน</h4>
@@ -723,14 +724,14 @@
                       <th class="px-3 py-2 font-semibold">ช่วงในคลิป</th>
                       <th class="px-3 py-2 font-semibold text-right">คนเฉลี่ย</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (%)</th>
-                      <th class="px-3 py-2 font-semibold text-right">ตั้งใจเรียน</th>
-                      <th class="px-3 py-2 font-semibold text-right">หลับ</th>
-                      <th class="px-3 py-2 font-semibold text-right">ก้มหน้า</th>
-                      <th class="px-3 py-2 font-semibold text-right">ใช้โทรศัพท์</th>
-                      <th class="px-3 py-2 font-semibold text-right">สงสัยโทรศัพท์</th>
-                      <th class="px-3 py-2 font-semibold text-right">ยกมือ</th>
-                      <th class="px-3 py-2 font-semibold text-right">ยืน/ลุก</th>
-                      <th class="px-3 py-2 font-semibold text-right">ไม่ชัดเจน</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="ตั้งใจเรียน">ตั้งใจเรียน</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="หลับ">หลับ</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="ก้มหน้า">ก้มหน้า</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="ใช้โทรศัพท์">ใช้โทรศัพท์</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="สงสัยโทรศัพท์">สงสัยโทรศัพท์</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="ยกมือ">ยกมือ</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="ยืน/ลุก">ยืน/ลุก</th>
+                      <th class="px-3 py-2 font-semibold text-right" data-behavior-label="ไม่ชัดเจน">ไม่ชัดเจน</th>
                     </tr>
                   </thead>
                   <tbody id="reportTimelineBody" class="divide-y divide-gray-100"></tbody>
@@ -743,7 +744,7 @@
                 <h4 class="font-semibold text-gray-800">
                   สรุปตามตำแหน่ง
                 </h4>
-                <span class="text-xs text-gray-500">
+                <span id="reportTrackingCaption" class="text-xs text-gray-500">
                   จำนวนครั้ง / ระยะเวลาที่วิเคราะห์ได้ตลอดคาบ
                 </span>
               </div>
@@ -754,7 +755,7 @@
                 <table class="w-full min-w-[1200px] text-xs text-left">
                   <thead class="bg-gray-100 text-gray-700">
                     <tr>
-                      <th class="px-3 py-2 font-semibold">ตำแหน่ง</th>
+                      <th class="px-3 py-2 font-semibold text-center">ภาพ / ตำแหน่ง</th>
                       <th class="px-3 py-2 font-semibold text-right">เวลาวิเคราะห์รวม</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (%)</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ</th>
@@ -807,25 +808,6 @@
               </div>
             </div>
 
-            <div id="reportEvidenceSection" class="hidden">
-              <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <h4 class="font-semibold text-gray-800">
-                    ภาพอ้างอิงรายตำแหน่ง
-                  </h4>
-                  <p class="mt-1 text-xs text-gray-500">
-                    ภาพตัวแทนและพฤติกรรม ณ เวลาที่บันทึก
-                  </p>
-                </div>
-                <span id="reportEvidenceCaption" class="text-xs text-gray-500">
-                  0 ภาพ
-                </span>
-              </div>
-              <div
-                id="reportEvidenceGallery"
-                class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
-              ></div>
-            </div>
 
             <details id="reportMethodologySection" class="border-t border-gray-200 pt-4">
               <summary class="cursor-pointer py-2 font-semibold text-gray-800 focus-visible:outline-blue-600">เกณฑ์การวัดพฤติกรรมและข้อจำกัด</summary>
@@ -861,5 +843,12 @@
       id="toastContainer"
       class="fixed bottom-4 left-4 z-50 space-y-2 w-[calc(100%-2rem)] max-w-sm pointer-events-none sm:w-auto"
     ></div>
+    <dialog id="evidenceDialog" class="session-dialog evidence-dialog" aria-labelledby="evidenceDialogTitle">
+      <div class="flex items-center justify-between gap-3 p-4 border-b border-gray-200">
+        <h3 id="evidenceDialogTitle" class="font-semibold text-sm min-w-0"></h3>
+        <button id="evidenceCloseButton" type="button" class="history-icon-button" aria-label="ปิดภาพหลักฐาน" title="ปิดภาพหลักฐาน">&times;</button>
+      </div>
+      <img id="evidenceFullImage" alt="" class="evidence-full-image" />
+    </dialog>
   </body>
 </html>

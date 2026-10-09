@@ -126,7 +126,14 @@ class SessionApiTests(unittest.TestCase):
         history = [{"total_people": 11, "attention_rate": 70}, {"total_people": 3, "attention_rate": 30}]
         with patch.dict(self.server.stats_history, {session_id: history}):
             report = self.client.get(f"/api/export/{session_id}").json
-            item = next(item for item in self.client.get("/api/sessions").json["sessions"] if item["id"] == session_id)
+            with (
+                patch.object(database, "tracking_report", side_effect=AssertionError("History must not build full reports")),
+                patch.object(database, "qualified_attention_rates", wraps=database.qualified_attention_rates) as aggregate,
+            ):
+                response = self.client.get("/api/sessions")
+            self.assertEqual(response.status_code, 200)
+            aggregate.assert_called_once_with("teacher-a")
+            item = next(item for item in response.json["sessions"] if item["id"] == session_id)
         self.assertEqual(report["report_policy"], REPORT_POLICY)
         self.assertEqual(report["raw_summary"]["avg_attention_rate"], 50)
         self.assertEqual(report["summary"]["report_total_people"], 11)
@@ -140,6 +147,31 @@ class SessionApiTests(unittest.TestCase):
     def _delete_test_session(self, session_id):
         with self.server.session_database._connection() as connection:
             connection.execute("DELETE FROM class_sessions WHERE id = ?", (session_id,))
+
+    def test_history_fetches_qualified_rates_once_for_multiple_rounds(self):
+        from report_qualification import REPORT_POLICY
+
+        database = self.server.session_database
+        histories = {}
+        for index in range(3):
+            session_id = f"batch-policy-{index}"
+            database.upsert_session(session_id, name=session_id, owner_id="teacher-a",
+                                    room_name="Lab", course_name="AI", source_type="video",
+                                    source_label="clip.mp4", report_policy=REPORT_POLICY)
+            self.addCleanup(self._delete_test_session, session_id)
+            histories[session_id] = [{"total_people": 1, "attention_rate": 70}]
+        with (
+            patch.dict(self.server.stats_history, histories),
+            patch.object(database, "tracking_report", side_effect=AssertionError("History must not build full reports")),
+            patch.object(database, "qualified_attention_rates", wraps=database.qualified_attention_rates) as aggregate,
+        ):
+            response = self.client.get("/api/sessions")
+        self.assertEqual(response.status_code, 200)
+        aggregate.assert_called_once_with("teacher-a")
+        returned = {item["id"]: item for item in response.json["sessions"]}
+        for session_id in histories:
+            self.assertIsNone(returned[session_id]["avg_attention_rate"])
+            self.assertEqual(returned[session_id]["report_total_people"], 1)
 
     def test_tracker_factory_enables_new_policy_only_for_new_rounds(self):
         from report_qualification import REPORT_POLICY

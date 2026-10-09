@@ -9,6 +9,29 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from person_tracking import ATTENTIVE_BEHAVIORS, BEHAVIOR_KEYS
+from report_qualification import QUALIFICATION_TOLERANCE_SECONDS
+
+
+_SESSION_METADATA_SELECT = """
+    SELECT
+        sessions.id,
+        sessions.name,
+        sessions.owner_id,
+        rooms.name AS room_name,
+        courses.name AS course_name,
+        sessions.source_type,
+        sessions.source_label,
+        sessions.recording_started_at,
+        sessions.recording_ended_at,
+        sessions.analysis_interval_seconds,
+        sessions.report_policy_json,
+        sessions.created_at,
+        sessions.ended_at,
+        sessions.status
+    FROM class_sessions AS sessions
+    LEFT JOIN rooms ON rooms.id = sessions.room_id
+    LEFT JOIN courses ON courses.id = sessions.course_id
+"""
 
 
 def _utc_now():
@@ -31,6 +54,12 @@ def _parse_recording_start(value):
     if parsed.tzinfo is None:
         parsed = parsed.astimezone()
     return parsed.isoformat(timespec="seconds")
+
+
+def _decode_session_metadata(row):
+    result = dict(row)
+    result["report_policy"] = json.loads(result.pop("report_policy_json") or "null")
+    return result
 
 
 class SessionDatabase:
@@ -186,6 +215,10 @@ class SessionDatabase:
             event_columns = {row["name"] for row in connection.execute("PRAGMA table_info(behavior_events)")}
             if "observed_segments_json" not in event_columns:
                 connection.execute("ALTER TABLE behavior_events ADD COLUMN observed_segments_json TEXT NOT NULL DEFAULT '[]'")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_owner_created "
+                "ON class_sessions(owner_id, created_at)"
+            )
 
     def _catalog_id(self, connection, table, name):
         clean_name = _clean_text(name, "ไม่ระบุ", 100)
@@ -437,17 +470,46 @@ class SessionDatabase:
 
     def list_sessions(self, owner_id=None):
         with self._connection() as connection:
-            if owner_id is None:
-                rows = connection.execute(
-                    "SELECT id FROM class_sessions ORDER BY created_at DESC"
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT id FROM class_sessions WHERE owner_id = ? "
-                    "ORDER BY created_at DESC",
-                    (owner_id,),
-                ).fetchall()
-            return [self._session_metadata(connection, row["id"]) for row in rows]
+            where = "WHERE sessions.owner_id = ? " if owner_id is not None else ""
+            rows = connection.execute(
+                _SESSION_METADATA_SELECT + where + "ORDER BY sessions.created_at DESC",
+                (owner_id,) if owner_id is not None else (),
+            ).fetchall()
+            return [_decode_session_metadata(row) for row in rows]
+
+    def qualified_attention_rates(self, owner_id=None):
+        """Read report attention for all owned rounds without materializing reports."""
+        attentive = sorted(ATTENTIVE_BEHAVIORS)
+        placeholders = ",".join("?" for _ in attentive)
+        where = "AND sessions.owner_id = ?" if owner_id is not None else ""
+        parameters = [*attentive, QUALIFICATION_TOLERANCE_SECONDS, float("inf")]
+        if owner_id is not None:
+            parameters.append(owner_id)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT sessions.id,
+                    COALESCE(SUM(events.duration_seconds), 0) AS qualified_seconds,
+                    COALESCE(SUM(CASE WHEN events.behavior IN ({placeholders})
+                        THEN events.duration_seconds ELSE 0 END), 0) AS attention_seconds
+                FROM class_sessions AS sessions
+                LEFT JOIN behavior_events AS events
+                    ON events.session_id = sessions.id
+                    AND events.duration_seconds + ? >= CAST(json_extract(
+                        sessions.report_policy_json, '$.minimum_behavior_seconds'
+                    ) AS REAL)
+                    AND events.duration_seconds < ?
+                    AND json_array_length(events.observed_segments_json) > 0
+                WHERE sessions.report_policy_json IS NOT NULL {where}
+                GROUP BY sessions.id
+                """,
+                parameters,
+            ).fetchall()
+        return {
+            row["id"]: round(row["attention_seconds"] / row["qualified_seconds"] * 100, 1)
+            if row["qualified_seconds"] > 0 else None
+            for row in rows
+        }
 
     def archive_rows(self, session_id):
         with self._connection() as connection:
@@ -475,34 +537,10 @@ class SessionDatabase:
 
     def _session_metadata(self, connection, session_id):
         row = connection.execute(
-            """
-            SELECT
-                sessions.id,
-                sessions.name,
-                sessions.owner_id,
-                rooms.name AS room_name,
-                courses.name AS course_name,
-                sessions.source_type,
-                sessions.source_label,
-                sessions.recording_started_at,
-                sessions.recording_ended_at,
-                sessions.analysis_interval_seconds,
-                sessions.report_policy_json,
-                sessions.created_at,
-                sessions.ended_at,
-                sessions.status
-            FROM class_sessions AS sessions
-            LEFT JOIN rooms ON rooms.id = sessions.room_id
-            LEFT JOIN courses ON courses.id = sessions.course_id
-            WHERE sessions.id = ?
-            """,
+            _SESSION_METADATA_SELECT + "WHERE sessions.id = ?",
             (session_id,),
         ).fetchone()
-        if row is None:
-            return None
-        result = dict(row)
-        result["report_policy"] = json.loads(result.pop("report_policy_json") or "null")
-        return result
+        return _decode_session_metadata(row) if row is not None else None
 
     def _empty_totals(self):
         return {

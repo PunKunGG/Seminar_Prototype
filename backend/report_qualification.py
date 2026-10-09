@@ -12,6 +12,7 @@ REPORT_POLICY = {
     "duration_basis": "observed_time",
     "identity_scope": "position_within_session",
 }
+QUALIFICATION_TOLERANCE_SECONDS = 1e-9
 
 
 def _totals():
@@ -43,7 +44,7 @@ def qualify_tracking(tracking, policy, period_seconds=300):
     for event in tracking.get("events", []):
         duration = float(event.get("observed_duration_seconds", event["duration_seconds"]))
         behavior = event["behavior"]
-        if not math.isfinite(duration) or duration + 1e-9 < minimum:
+        if not math.isfinite(duration) or duration + QUALIFICATION_TOLERANCE_SECONDS < minimum:
             continue
         segments = event.get("observed_segments") or []
         if not segments:

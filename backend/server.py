@@ -1545,14 +1545,17 @@ def list_analysis_sessions():
         if CONFIG.supabase_auth_enabled else None
     )
     local = session_database.list_sessions(owner_id)
+    qualified_rates = (
+        session_database.qualified_attention_rates(owner_id)
+        if any(item.get("report_policy") for item in local) else {}
+    )
     with state_lock:
         histories = {item["id"]: list(stats_history.get(item["id"], [])) for item in local}
     combined = {}
     for item in local:
         summary = summarize_report_history(histories[item["id"]])
         if item.get("report_policy"):
-            qualified = qualify_tracking(session_database.tracking_report(item["id"], period_seconds=300), item["report_policy"])
-            summary["avg_attention_rate"] = qualified["summary"]["attention_rate"]
+            summary["avg_attention_rate"] = qualified_rates.get(item["id"])
         has_records = summary["total_records"] > 0
         combined[item["id"]] = {
             **item,

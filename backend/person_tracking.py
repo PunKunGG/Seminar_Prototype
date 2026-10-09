@@ -446,6 +446,7 @@ class SessionTracker:
 
     def _match_positions(self, detections, timestamp):
         candidates = []
+        rankings = {}
         self._ambiguous_positions = set()
         for index, detection in enumerate(detections):
             ranked = []
@@ -453,7 +454,7 @@ class SessionTracker:
                 distance = self._position_distance(track, detection)
                 if distance is not None and distance <= self.max_position_distance:
                     ranked.append((distance, track.track_id))
-                elif (distance is None and track.active
+                elif (track.active
                       and timestamp - track.last_seen <= self.max_missing_seconds
                       and _bbox_iou(track.bbox, detection["bbox"]) >= 0.5):
                     ranked.append((self.max_position_distance + 1, track.track_id))
@@ -462,13 +463,37 @@ class SessionTracker:
                 self._ambiguous_positions.add(index)
                 continue
             if ranked:
-                candidates.append((ranked[0][0], ranked[0][1], index))
+                rankings[index] = ranked
+                candidates.extend((distance, track_id, index) for distance, track_id in ranked)
         matches = {}
-        used = set()
-        for _, track_id, index in sorted(candidates):
-            if track_id not in used:
-                matches[index] = self._tracks[track_id]
-                used.add(track_id)
+        assigned_tracks = {}
+
+        # Reroute existing matches along valid alternatives before dropping an observation.
+        def assign_alternative(index, visited_tracks, maximum_distance):
+            for distance, track_id in rankings[index]:
+                if distance > maximum_distance or track_id in visited_tracks:
+                    continue
+                visited_tracks.add(track_id)
+                previous_index = assigned_tracks.get(track_id)
+                if previous_index is None or assign_alternative(previous_index, visited_tracks, maximum_distance):
+                    matches[index] = self._tracks[track_id]
+                    assigned_tracks[track_id] = index
+                    return True
+            return False
+
+        # Finish shoulder-anchor assignment before considering overlapping-box fallbacks.
+        ordered_candidates = sorted(candidates)
+        for maximum_distance in (self.max_position_distance, float("inf")):
+            for distance, track_id, index in ordered_candidates:
+                if distance <= maximum_distance and track_id not in assigned_tracks and index not in matches:
+                    matches[index] = self._tracks[track_id]
+                    assigned_tracks[track_id] = index
+            for index in rankings:
+                if index not in matches:
+                    assign_alternative(index, set(), maximum_distance)
+        for index in rankings:
+            if index not in matches:
+                self._ambiguous_positions.add(index)
         return matches
 
     def _confirm_position(self, detection, timestamp, used_pending):

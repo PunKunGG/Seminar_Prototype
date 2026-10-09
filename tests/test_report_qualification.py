@@ -142,6 +142,69 @@ class PersistentPositionTests(unittest.TestCase):
         reversed_result = tracker.update([position(0.27), position(0.2)], timestamp=3.5)
         self.assertEqual([item["track_id"] for item in reversed_result["detections"]], [2, 1])
 
+    def test_adjacent_people_keep_ids_when_both_prefer_the_same_position(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                tracker = self.make_tracker()
+                self.establish(tracker, [position(0.2), position(0.27)])
+                detections = [position(0.205), position(0.22)]
+                expected = [1, 2]
+                if reverse:
+                    detections.reverse()
+                    expected.reverse()
+                for step in range(8):
+                    result = tracker.update(detections, timestamp=3.5 + step * 0.5)
+                    self.assertEqual([item["track_id"] for item in result["detections"]], expected)
+                self.assertEqual(len(tracker.summaries()), 2)
+                self.assertEqual([item["visible_seconds"] for item in tracker.summaries()], [4, 4])
+
+    def test_assignment_can_move_a_match_to_its_valid_alternative(self):
+        tracker = self.make_tracker()
+        self.establish(tracker, [position(0.2), position(0.3)])
+        # The first detection can use either seat; the second can only use ID 1.
+        for step in range(8):
+            result = tracker.update([position(0.202), position(0.18)], timestamp=3.5 + step * 0.5)
+            self.assertEqual([item["track_id"] for item in result["detections"]], [2, 1])
+        self.assertEqual(len(tracker.summaries()), 2)
+
+    def test_conflicting_detection_waits_instead_of_creating_a_duplicate_position(self):
+        tracker = self.make_tracker()
+        self.establish(tracker, [position()])
+        for step in range(8):
+            result = tracker.update([position(), position(0.23)], timestamp=3.5 + step * 0.5)
+            self.assertEqual([item["track_id"] for item in result["detections"]], [1, None])
+        self.assertEqual(len(tracker.summaries()), 1)
+
+    def test_active_id_survives_shoulder_motion_without_moving_seat_anchor(self):
+        for behavior in ("standing", "looking_down"):
+            with self.subTest(behavior=behavior):
+                tracker = self.make_tracker()
+                self.establish(tracker, [position()])
+                moved = position(0.2, 0.45, behavior=behavior)
+                moved["bbox"] = [150, 240, 250, 440]
+                for step in range(8):
+                    result = tracker.update([moved], timestamp=3.5 + step * 0.5)
+                    self.assertEqual(result["detections"][0]["track_id"], 1)
+                    self.assertFalse(result["detections"][0]["reacquired"])
+                self.assertEqual(tracker._tracks[1].position_anchor, (0.2, 0.3))
+                self.assertEqual(len(tracker.summaries()), 1)
+                self.assertEqual(tracker.summaries()[0]["visible_seconds"], 4)
+                returned = tracker.update([position()], timestamp=7.5)
+                self.assertEqual(returned["detections"][0]["track_id"], 1)
+
+    def test_posture_overlap_does_not_reacquire_an_inactive_or_stale_id(self):
+        moved = position(0.2, 0.45, behavior="standing")
+        moved["bbox"] = [150, 240, 250, 440]
+        for explicitly_missing in (False, True):
+            with self.subTest(explicitly_missing=explicitly_missing):
+                tracker = self.make_tracker()
+                self.establish(tracker, [position()])
+                if explicitly_missing:
+                    tracker.update([], timestamp=8)
+                result = tracker.update([moved], timestamp=9)
+                self.assertIsNone(result["detections"][0]["track_id"])
+                self.assertEqual(len(tracker.summaries()), 1)
+
     def test_ambiguous_position_does_not_create_or_merge_ids(self):
         tracker = self.make_tracker()
         self.establish(tracker, [position(0.2), position(0.27)])

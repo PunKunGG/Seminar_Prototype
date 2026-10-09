@@ -1561,7 +1561,7 @@ def list_analysis_sessions():
             **item,
             "storage": "local",
             "report_total_people": summary["report_total_people"] if has_records else None,
-            "avg_attention_rate": summary["avg_attention_rate"] if has_records else None,
+            "avg_attention_rate": summary["avg_attention_rate"] if has_records or item.get("report_policy") else None,
         }
     archive_error = None
     if supabase_archive is not None and owner_id:

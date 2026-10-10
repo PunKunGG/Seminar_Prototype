@@ -13,6 +13,9 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from supabase_archive import ArchiveError, SupabaseArchive
+from person_tracking import SessionTracker
+from report_qualification import REPORT_POLICY, qualify_tracking
+from session_database import SessionDatabase
 
 
 class SupabaseArchiveTests(unittest.TestCase):
@@ -72,6 +75,50 @@ class SupabaseArchiveTests(unittest.TestCase):
         self.assertIn("owner_id=eq.teacher-id", url)
         self.assertIn("session_id=eq.round-1", url)
         self.assertIn("status=eq.completed", url)
+
+    def test_new_policy_round_trip_keeps_json_fields_without_remote_schema_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = SessionDatabase(os.path.join(directory, "sessions.db"))
+            database.upsert_session("round-new", name="New", owner_id="teacher-id", room_name="Lab",
+                                    course_name="AI", source_type="video", source_label="clip.mp4",
+                                    recording_started_at="2026-10-09T09:00:00+07:00", report_policy=REPORT_POLICY)
+            tracker = SessionTracker(record_observed_segments=True, observation_step_seconds=1,
+                                     max_observation_gap_seconds=2)
+            for timestamp in range(31):
+                tracker.update([{"bbox": [0, 0, 100, 200], "behavior": "attentive"}], timestamp=timestamp)
+            database.sync_tracking("round-new", tracker.persistence_snapshot())
+            for key in ("reference", "portrait"):
+                filename = f"{key}.jpg"
+                with open(os.path.join(directory, filename), "wb") as image_file:
+                    image_file.write(b"jpeg")
+                database.add_evidence("round-new", track_id=1, evidence_key=key, kind="reference",
+                                      event_index=None, filename=filename, behavior="attentive",
+                                      captured_seconds=3, width=320, height=320, file_size=4)
+            database.finish_session("round-new", duration_seconds=30)
+            tracking = database.tracking_report("round-new")
+            report = {"lab_id": "round-new", "report_policy": REPORT_POLICY,
+                      "qualified_analysis": qualify_tracking(tracking, REPORT_POLICY), "tracking": tracking}
+
+            class Evidence:
+                def resolve_file(self, session_id, filename):
+                    return os.path.join(directory, filename)
+
+            with patch.object(self.archive, "_catalog_id", return_value=1):
+                self.archive.archive_report("teacher-id", report, Evidence(), database.archive_rows("round-new"))
+
+        normalized = [request for request in self.requests
+                      if "/rest/v1/" in request.full_url and "analysis_jobs" not in request.full_url and request.data]
+        for request in normalized:
+            self.assertNotIn(b"observed_segments_json", request.data)
+            self.assertNotIn(b"report_policy_json", request.data)
+        archived = json.loads(self.requests[-1].data)["result_summary"]
+        self.assertEqual(archived["report_policy"], REPORT_POLICY)
+        self.assertEqual(archived["tracking"]["events"][0]["observed_segments"], [[0, 30, 30]])
+        self.assertEqual(archived["tracking"]["representative_evidence"][0]["thumbnail_filename"], "portrait.jpg")
+        with patch.object(self.archive, "_table", return_value=[{"result_summary": archived}]):
+            self.assertEqual(self.archive.get_report("teacher-id", "round-new"), archived)
+            self.assertEqual(self.archive.get_evidence("teacher-id", "round-new", "portrait.jpg"), b"[]")
+        self.assertIn("teacher-id/round-new/portrait.jpg", self.requests[-1].full_url)
 
     def test_evidence_requires_membership_in_owned_report(self):
         with patch.object(self.archive, "get_report", return_value=None):

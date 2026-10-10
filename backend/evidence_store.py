@@ -75,6 +75,8 @@ class EvidenceStore:
         track_part = f"id_{int(track_id):04d}"
         if kind == "reference":
             return f"{track_part}_reference.jpg"
+        if kind == "portrait":
+            return f"{track_part}_portrait.jpg"
         behavior_part = _safe_part(behavior, "unknown")[:32]
         event_part = max(0, int(event_index or 0))
         time_part = max(0, int(round(float(captured_seconds or 0) * 1000)))
@@ -94,6 +96,7 @@ class EvidenceStore:
         captured_seconds,
         frame,
         bbox,
+        square_size=None,
     ):
         if frame is None or bbox is None or len(bbox) != 4:
             return None
@@ -105,8 +108,9 @@ class EvidenceStore:
         if frame_width <= 0 or frame_height <= 0 or x2 <= x1 or y2 <= y1:
             return None
 
-        pad_x = (x2 - x1) * self.padding_ratio
-        pad_y = (y2 - y1) * self.padding_ratio
+        padding_ratio = 0 if square_size else self.padding_ratio
+        pad_x = (x2 - x1) * padding_ratio
+        pad_y = (y2 - y1) * padding_ratio
         left = max(0, int(x1 - pad_x))
         top = max(0, int(y1 - pad_y))
         right = min(frame_width, int(x2 + pad_x))
@@ -120,7 +124,15 @@ class EvidenceStore:
 
         import cv2
 
-        if longest > self.max_dimension:
+        if square_size:
+            crop = cv2.copyMakeBorder(
+                crop,
+                max(0, -int(y1)), max(0, int(y2) - frame_height),
+                max(0, -int(x1)), max(0, int(x2) - frame_width),
+                cv2.BORDER_CONSTANT, value=(245, 245, 245),
+            )
+            crop = cv2.resize(crop, (square_size, square_size), interpolation=cv2.INTER_AREA)
+        elif longest > self.max_dimension:
             scale = self.max_dimension / longest
             crop = cv2.resize(
                 crop,

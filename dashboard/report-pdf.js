@@ -28,7 +28,7 @@ function collectPdfKeepTogetherRanges(root) {
 
   return Array.from(
     root.querySelectorAll(
-      "[data-pdf-keep-together], #reportEvidenceGallery figure, table tr, canvas",
+      "[data-pdf-keep-together], table tr, canvas",
     ),
   )
     .map((element) => {

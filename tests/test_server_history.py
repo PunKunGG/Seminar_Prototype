@@ -105,6 +105,129 @@ class SessionApiTests(unittest.TestCase):
         self.assertEqual(exported_at, generated_at)
         clock.now.assert_called_once_with(timezone.utc)
 
+    def test_new_report_and_history_use_qualified_time_but_keep_raw_people(self):
+        from person_tracking import SessionTracker
+        from report_qualification import REPORT_POLICY
+
+        database = self.server.session_database
+        session_id = "new-policy-test"
+        database.upsert_session(session_id, name="Qualified", owner_id="teacher-a",
+                                room_name="Lab", course_name="AI", source_type="video",
+                                source_label="clip.mp4", report_policy=REPORT_POLICY)
+        self.addCleanup(lambda: self._delete_test_session(session_id))
+        tracker = SessionTracker(record_observed_segments=True, observation_step_seconds=1,
+                                 max_observation_gap_seconds=2)
+        for timestamp in range(61):
+            tracker.update([{"bbox": [0, 0, 100, 200], "behavior": "attentive"}], timestamp=timestamp)
+        tracker.update([], timestamp=61)
+        for timestamp in range(62, 72):
+            tracker.update([{"bbox": [0, 0, 100, 200], "behavior": "attentive"}], timestamp=timestamp)
+        database.sync_tracking(session_id, tracker.persistence_snapshot())
+        history = [{"total_people": 11, "attention_rate": 70}, {"total_people": 3, "attention_rate": 30}]
+        with patch.dict(self.server.stats_history, {session_id: history}):
+            report = self.client.get(f"/api/export/{session_id}").json
+            with (
+                patch.object(database, "tracking_report", side_effect=AssertionError("History must not build full reports")),
+                patch.object(database, "qualified_attention_rates", wraps=database.qualified_attention_rates) as aggregate,
+            ):
+                response = self.client.get("/api/sessions")
+            self.assertEqual(response.status_code, 200)
+            aggregate.assert_called_once_with("teacher-a")
+            item = next(item for item in response.json["sessions"] if item["id"] == session_id)
+        self.assertEqual(report["report_policy"], REPORT_POLICY)
+        self.assertEqual(report["raw_summary"]["avg_attention_rate"], 50)
+        self.assertEqual(report["summary"]["report_total_people"], 11)
+        self.assertEqual(report["qualified_analysis"]["summary"]["qualified_seconds"], 60)
+        self.assertEqual(report["summary"]["avg_attention_rate"], 100)
+        self.assertEqual(item["avg_attention_rate"], 100)
+        self.assertEqual(len(report["tracking"]["events"]), 2)
+        self.assertEqual(len(report["qualified_analysis"]["events"]), 1)
+        self.assertNotIn("report_policy", self.client.get("/api/export/owned").json)
+
+    def _delete_test_session(self, session_id):
+        with self.server.session_database._connection() as connection:
+            connection.execute("DELETE FROM class_sessions WHERE id = ?", (session_id,))
+
+    def test_history_fetches_qualified_rates_once_for_multiple_rounds(self):
+        from report_qualification import REPORT_POLICY
+
+        database = self.server.session_database
+        histories = {}
+        for index in range(3):
+            session_id = f"batch-policy-{index}"
+            database.upsert_session(session_id, name=session_id, owner_id="teacher-a",
+                                    room_name="Lab", course_name="AI", source_type="video",
+                                    source_label="clip.mp4", report_policy=REPORT_POLICY)
+            self.addCleanup(self._delete_test_session, session_id)
+            histories[session_id] = [{"total_people": 1, "attention_rate": 70}]
+        with (
+            patch.dict(self.server.stats_history, histories),
+            patch.object(database, "tracking_report", side_effect=AssertionError("History must not build full reports")),
+            patch.object(database, "qualified_attention_rates", wraps=database.qualified_attention_rates) as aggregate,
+        ):
+            response = self.client.get("/api/sessions")
+        self.assertEqual(response.status_code, 200)
+        aggregate.assert_called_once_with("teacher-a")
+        returned = {item["id"]: item for item in response.json["sessions"]}
+        for session_id in histories:
+            self.assertIsNone(returned[session_id]["avg_attention_rate"])
+            self.assertEqual(returned[session_id]["report_total_people"], 1)
+
+    def test_history_keeps_persisted_qualified_rates_without_in_memory_observations(self):
+        from person_tracking import SessionTracker
+        from report_qualification import REPORT_POLICY
+        from session_database import SessionDatabase
+
+        database = self.server.session_database
+        expected = {}
+        for behavior, seconds, rate in (("attentive", 20, None), ("attentive", 30, 100), ("standing", 30, 0)):
+            session_id = f"persisted-{behavior}-{seconds}"
+            database.upsert_session(session_id, name=session_id, owner_id="teacher-a",
+                                    room_name="Lab", course_name="AI", source_type="video",
+                                    source_label="clip.mp4", report_policy=REPORT_POLICY)
+            self.addCleanup(self._delete_test_session, session_id)
+            tracker = SessionTracker(record_observed_segments=True, observation_step_seconds=1,
+                                     max_observation_gap_seconds=2)
+            for timestamp in range(seconds + 1):
+                tracker.update([{"bbox": [0, 0, 100, 200], "behavior": behavior}], timestamp=timestamp)
+            database.sync_tracking(session_id, tracker.persistence_snapshot())
+            database.finish_session(session_id, duration_seconds=seconds)
+            expected[session_id] = rate
+
+        restarted_database = SessionDatabase(database.path)
+        unavailable_archive = types.SimpleNamespace(list_sessions=lambda owner: (
+            (_ for _ in ()).throw(self.server.ArchiveError("offline"))
+        ))
+        for archive in (None, unavailable_archive):
+            with (
+                self.subTest(archive_enabled=archive is not None),
+                patch.object(self.server, "session_database", restarted_database),
+                patch.object(self.server, "supabase_archive", archive),
+                patch.dict(self.server.stats_history, {}, clear=True),
+                patch.object(restarted_database, "tracking_report", side_effect=AssertionError("History must not build full reports")),
+                patch.object(restarted_database, "qualified_attention_rates", wraps=restarted_database.qualified_attention_rates) as aggregate,
+            ):
+                response = self.client.get("/api/sessions")
+                self.assertEqual(response.status_code, 200)
+                aggregate.assert_called_once_with("teacher-a")
+                returned = {item["id"]: item for item in response.json["sessions"]}
+                for session_id, rate in expected.items():
+                    self.assertEqual(returned[session_id]["avg_attention_rate"], rate)
+                    self.assertIsNone(returned[session_id]["report_total_people"])
+                self.assertIsNone(returned["owned"]["avg_attention_rate"])
+                self.assertNotIn("foreign", returned)
+
+    def test_tracker_factory_enables_new_policy_only_for_new_rounds(self):
+        from report_qualification import REPORT_POLICY
+
+        for processing_mode in ("realtime", "sampled"):
+            for new_policy in (False, True):
+                with self.subTest(mode=processing_mode, new_policy=new_policy):
+                    metadata = {"processing_mode": processing_mode, "report_policy": REPORT_POLICY if new_policy else None}
+                    tracker = self.server._new_session_tracker(metadata)
+                    self.assertEqual(tracker.persistent_positions, new_policy)
+                    self.assertEqual(tracker.record_observed_segments, new_policy)
+
     def test_history_metrics_use_whole_round_not_final_frame(self):
         history = [
             {"total_people": 11, "attention_rate": 80},

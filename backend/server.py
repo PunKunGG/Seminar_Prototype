@@ -37,6 +37,7 @@ from person_tracking import (
     SessionTracker,
 )
 from session_database import SessionDatabase
+from report_qualification import REPORT_POLICY, qualify_tracking
 from supabase_archive import ArchiveError, SupabaseArchive
 from video_sampling import (
     aggregate_analyses,
@@ -449,6 +450,10 @@ def _analyze_frame_with_context(buf, frame, marker=None):
 
 
 def _new_session_tracker(metadata):
+    report_options = {
+        "persistent_positions": (metadata.get("report_policy") or {}).get("version") == 2,
+        "record_observed_segments": (metadata.get("report_policy") or {}).get("version") == 2,
+    }
     if metadata.get("processing_mode") == "sampled":
         sample_fps = max(0.1, float(metadata.get("sample_fps") or 2.0))
         sample_interval = max(
@@ -456,6 +461,7 @@ def _new_session_tracker(metadata):
             float(metadata.get("sample_interval_seconds") or 60),
         )
         return SessionTracker(
+            **report_options,
             max_missing_seconds=sample_interval + 15,
             observation_step_seconds=1.0 / sample_fps,
             max_observation_gap_seconds=(1.0 / sample_fps) * 1.75,
@@ -465,6 +471,7 @@ def _new_session_tracker(metadata):
             max_position_distance=CONFIG.track_position_max_distance,
         )
     return SessionTracker(
+        **report_options,
         max_missing_seconds=max(
             1.0,
             CONFIG.track_max_missing_seconds,
@@ -650,6 +657,8 @@ def _with_evidence_urls(session_id, report):
                 session_id,
                 item.get("filename", ""),
             )
+            if item.get("thumbnail_filename"):
+                item["thumbnail_url"] = _evidence_url(session_id, item["thumbnail_filename"])
     return report
 
 
@@ -672,7 +681,9 @@ def _capture_evidence(lab_id, cam_id, frame, detections, timestamp):
 
         candidates = []
         if detection.get("is_new_track"):
-            candidates.append(("reference", "reference", None))
+            candidates.append(("reference", "reference", None, detection.get("bbox"), False))
+        if detection.get("portrait_bbox"):
+            candidates.append(("portrait", "reference", None, detection["portrait_bbox"], True))
         if (
             detection.get("event_started")
             and behavior in EVIDENCE_BEHAVIORS
@@ -683,9 +694,11 @@ def _capture_evidence(lab_id, cam_id, frame, detections, timestamp):
                 f"event:{event_index}",
                 "event",
                 event_index,
+                detection.get("bbox"),
+                False,
             ))
 
-        for evidence_key, kind, evidence_event_index in candidates:
+        for evidence_key, kind, evidence_event_index, crop_bbox, portrait in candidates:
             unique_key = (int(track_id), evidence_key)
             if unique_key in saved_keys:
                 continue
@@ -693,12 +706,13 @@ def _capture_evidence(lab_id, cam_id, frame, detections, timestamp):
                 result = evidence_store.save_crop(
                     session_id=lab_id,
                     track_id=track_id,
-                    kind=kind,
+                    kind="portrait" if portrait else kind,
                     event_index=evidence_event_index,
                     behavior=behavior,
                     captured_seconds=timestamp,
                     frame=frame,
-                    bbox=detection.get("bbox"),
+                    bbox=crop_bbox,
+                    square_size=320 if portrait else None,
                 )
             except Exception as error:
                 print(
@@ -1531,17 +1545,23 @@ def list_analysis_sessions():
         if CONFIG.supabase_auth_enabled else None
     )
     local = session_database.list_sessions(owner_id)
+    qualified_rates = (
+        session_database.qualified_attention_rates(owner_id)
+        if any(item.get("report_policy") for item in local) else {}
+    )
     with state_lock:
         histories = {item["id"]: list(stats_history.get(item["id"], [])) for item in local}
     combined = {}
     for item in local:
         summary = summarize_report_history(histories[item["id"]])
+        if item.get("report_policy"):
+            summary["avg_attention_rate"] = qualified_rates.get(item["id"])
         has_records = summary["total_records"] > 0
         combined[item["id"]] = {
             **item,
             "storage": "local",
             "report_total_people": summary["report_total_people"] if has_records else None,
-            "avg_attention_rate": summary["avg_attention_rate"] if has_records else None,
+            "avg_attention_rate": summary["avg_attention_rate"] if has_records or item.get("report_policy") else None,
         }
     archive_error = None
     if supabase_archive is not None and owner_id:
@@ -1771,7 +1791,7 @@ def _build_export_data(lab_id):
         methodology["realtime_summary_interval_seconds"] = session_interval
         methodology["long_video_sampling"]["interval_seconds"] = session_interval
 
-    return {
+    result = {
         "lab_id": lab_id,
         "session_name": (
             (tracking_report.get("session") or {}).get("name")
@@ -1786,6 +1806,21 @@ def _build_export_data(lab_id):
         "history": history,
         "activities": activities
     }
+    policy = (tracking_report.get("session") or {}).get("report_policy")
+    if policy:
+        qualified = qualify_tracking(tracking_report, policy)
+        result["report_policy"] = policy
+        result["qualified_analysis"] = qualified
+        result["raw_summary"] = dict(report_summary)
+        report_summary["avg_attention_rate"] = qualified["summary"]["attention_rate"]
+        report_summary["report_attention_rate"] = qualified["summary"]["attention_rate"]
+        methodology["attention_formula"] = "(เวลาตั้งใจเรียน + เวลายกมือที่ผ่านเกณฑ์) / เวลาพฤติกรรมทั้งหมดที่ผ่านเกณฑ์ x 100"
+        methodology["limitations"].extend([
+            "รายงานไม่นับช่วงพฤติกรรมที่มีเวลาตรวจจริงต่ำกว่า 30 วินาที และไม่ถือว่าช่วงที่ตัดออกเป็นตั้งใจเรียน",
+            "คลิปแบบสุ่มช่วงสะสมเฉพาะเวลาที่ตรวจจริง ไม่ยืนยันพฤติกรรมต่อเนื่องระหว่างช่วงที่ไม่ได้ตรวจ",
+            "Position ID ใช้ตำแหน่งภายในรอบ ไม่ยืนยันตัวบุคคลเมื่อสลับที่นั่ง และต้องใช้กล้องมุมคงที่",
+        ])
+    return result
 
 
 @app.route("/api/export/<lab_id>")
@@ -2078,6 +2113,7 @@ def set_source(lab_id, cam_id):
         return jsonify({"error": f"ไม่สามารถเปิดได้: {label}"}), 400
     metadata = _probe_source(test_cap, source, analysis_interval)
     metadata["analysis_interval_seconds"] = analysis_interval
+    metadata["report_policy"] = dict(REPORT_POLICY)
     test_cap.release()
 
     _stop_capture(lab_id, cam_id)
@@ -2100,6 +2136,7 @@ def set_source(lab_id, cam_id):
                 recording_start.isoformat() if isinstance(source, str) else None
             ),
             reset_tracking=True,
+            report_policy=REPORT_POLICY,
         )
     except Exception as error:
         return jsonify({

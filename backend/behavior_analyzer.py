@@ -13,6 +13,7 @@ import numpy as np
 import cv2
 import os
 import threading
+from pose_geometry import report_geometry
 
 # ──────────────────────────────────────────────
 # โมเดล (lazy-loading)
@@ -793,6 +794,7 @@ def analyze_frame(
         analysis = analyze_pose(kp, **context)
         if index < len(box_rows):
             analysis["bbox"] = person_bbox
+            analysis.update(report_geometry(kp, person_bbox, frame.shape, KP_CONF_THRESHOLD))
         if index < len(box_confidences):
             analysis["detection_confidence"] = round(
                 float(box_confidences[index]) * 100,

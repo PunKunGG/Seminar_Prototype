@@ -9,6 +9,29 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from person_tracking import ATTENTIVE_BEHAVIORS, BEHAVIOR_KEYS
+from report_qualification import QUALIFICATION_TOLERANCE_SECONDS
+
+
+_SESSION_METADATA_SELECT = """
+    SELECT
+        sessions.id,
+        sessions.name,
+        sessions.owner_id,
+        rooms.name AS room_name,
+        courses.name AS course_name,
+        sessions.source_type,
+        sessions.source_label,
+        sessions.recording_started_at,
+        sessions.recording_ended_at,
+        sessions.analysis_interval_seconds,
+        sessions.report_policy_json,
+        sessions.created_at,
+        sessions.ended_at,
+        sessions.status
+    FROM class_sessions AS sessions
+    LEFT JOIN rooms ON rooms.id = sessions.room_id
+    LEFT JOIN courses ON courses.id = sessions.course_id
+"""
 
 
 def _utc_now():
@@ -31,6 +54,12 @@ def _parse_recording_start(value):
     if parsed.tzinfo is None:
         parsed = parsed.astimezone()
     return parsed.isoformat(timespec="seconds")
+
+
+def _decode_session_metadata(row):
+    result = dict(row)
+    result["report_policy"] = json.loads(result.pop("report_policy_json") or "null")
+    return result
 
 
 class SessionDatabase:
@@ -177,11 +206,19 @@ class SessionDatabase:
                 ("owner_id", "TEXT"),
                 ("recording_ended_at", "TEXT"),
                 ("analysis_interval_seconds", "INTEGER NOT NULL DEFAULT 30"),
+                ("report_policy_json", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(
                         f"ALTER TABLE class_sessions ADD COLUMN {name} {definition}"
                     )
+            event_columns = {row["name"] for row in connection.execute("PRAGMA table_info(behavior_events)")}
+            if "observed_segments_json" not in event_columns:
+                connection.execute("ALTER TABLE behavior_events ADD COLUMN observed_segments_json TEXT NOT NULL DEFAULT '[]'")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_owner_created "
+                "ON class_sessions(owner_id, created_at)"
+            )
 
     def _catalog_id(self, connection, table, name):
         clean_name = _clean_text(name, "ไม่ระบุ", 100)
@@ -208,6 +245,7 @@ class SessionDatabase:
         analysis_interval_seconds=30,
         recording_started_at=None,
         reset_tracking=False,
+        report_policy=None,
     ):
         session_id = _clean_text(session_id, max_length=160)
         if not session_id:
@@ -253,6 +291,11 @@ class SessionDatabase:
                     "DELETE FROM session_tracks WHERE session_id = ?",
                     (session_id,),
                 )
+            if report_policy is not None:
+                connection.execute(
+                    "UPDATE class_sessions SET report_policy_json = ? WHERE id = ?",
+                    (json.dumps(report_policy), session_id),
+                )
 
     def sync_tracking(self, session_id, tracks):
         if not tracks:
@@ -297,15 +340,16 @@ class SessionDatabase:
                         INSERT INTO behavior_events(
                             session_id, track_id, event_index, behavior,
                             start_seconds, end_seconds, duration_seconds,
-                            avg_confidence
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            avg_confidence, observed_segments_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(session_id, track_id, event_index)
                         DO UPDATE SET
                             behavior = excluded.behavior,
                             start_seconds = excluded.start_seconds,
                             end_seconds = excluded.end_seconds,
                             duration_seconds = excluded.duration_seconds,
-                            avg_confidence = excluded.avg_confidence
+                            avg_confidence = excluded.avg_confidence,
+                            observed_segments_json = excluded.observed_segments_json
                         """,
                         (
                             session_id,
@@ -316,6 +360,7 @@ class SessionDatabase:
                             event["end_seconds"],
                             event["duration_seconds"],
                             event["avg_confidence"],
+                            json.dumps(event.get("observed_segments", [])),
                         ),
                     )
                 for bucket in track.get("buckets", []):
@@ -425,17 +470,46 @@ class SessionDatabase:
 
     def list_sessions(self, owner_id=None):
         with self._connection() as connection:
-            if owner_id is None:
-                rows = connection.execute(
-                    "SELECT id FROM class_sessions ORDER BY created_at DESC"
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT id FROM class_sessions WHERE owner_id = ? "
-                    "ORDER BY created_at DESC",
-                    (owner_id,),
-                ).fetchall()
-            return [self._session_metadata(connection, row["id"]) for row in rows]
+            where = "WHERE sessions.owner_id = ? " if owner_id is not None else ""
+            rows = connection.execute(
+                _SESSION_METADATA_SELECT + where + "ORDER BY sessions.created_at DESC",
+                (owner_id,) if owner_id is not None else (),
+            ).fetchall()
+            return [_decode_session_metadata(row) for row in rows]
+
+    def qualified_attention_rates(self, owner_id=None):
+        """Read report attention for all owned rounds without materializing reports."""
+        attentive = sorted(ATTENTIVE_BEHAVIORS)
+        placeholders = ",".join("?" for _ in attentive)
+        where = "AND sessions.owner_id = ?" if owner_id is not None else ""
+        parameters = [*attentive, QUALIFICATION_TOLERANCE_SECONDS, float("inf")]
+        if owner_id is not None:
+            parameters.append(owner_id)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT sessions.id,
+                    COALESCE(SUM(events.duration_seconds), 0) AS qualified_seconds,
+                    COALESCE(SUM(CASE WHEN events.behavior IN ({placeholders})
+                        THEN events.duration_seconds ELSE 0 END), 0) AS attention_seconds
+                FROM class_sessions AS sessions
+                LEFT JOIN behavior_events AS events
+                    ON events.session_id = sessions.id
+                    AND events.duration_seconds + ? >= CAST(json_extract(
+                        sessions.report_policy_json, '$.minimum_behavior_seconds'
+                    ) AS REAL)
+                    AND events.duration_seconds < ?
+                    AND json_array_length(events.observed_segments_json) > 0
+                WHERE sessions.report_policy_json IS NOT NULL {where}
+                GROUP BY sessions.id
+                """,
+                parameters,
+            ).fetchall()
+        return {
+            row["id"]: round(row["attention_seconds"] / row["qualified_seconds"] * 100, 1)
+            if row["qualified_seconds"] > 0 else None
+            for row in rows
+        }
 
     def archive_rows(self, session_id):
         with self._connection() as connection:
@@ -457,34 +531,16 @@ class SessionDatabase:
                     if table == "session_tracks":
                         item["active"] = bool(item["active"])
                     item.pop("created_at", None)
+                    item.pop("observed_segments_json", None)
                 tables[table] = items
             return tables
 
     def _session_metadata(self, connection, session_id):
         row = connection.execute(
-            """
-            SELECT
-                sessions.id,
-                sessions.name,
-                sessions.owner_id,
-                rooms.name AS room_name,
-                courses.name AS course_name,
-                sessions.source_type,
-                sessions.source_label,
-                sessions.recording_started_at,
-                sessions.recording_ended_at,
-                sessions.analysis_interval_seconds,
-                sessions.created_at,
-                sessions.ended_at,
-                sessions.status
-            FROM class_sessions AS sessions
-            LEFT JOIN rooms ON rooms.id = sessions.room_id
-            LEFT JOIN courses ON courses.id = sessions.course_id
-            WHERE sessions.id = ?
-            """,
+            _SESSION_METADATA_SELECT + "WHERE sessions.id = ?",
             (session_id,),
         ).fetchone()
-        return dict(row) if row else None
+        return _decode_session_metadata(row) if row is not None else None
 
     def _empty_totals(self):
         return {
@@ -686,6 +742,8 @@ class SessionDatabase:
                     float(row["avg_confidence"]),
                     1,
                 ),
+                "observed_duration_seconds": float(row["duration_seconds"]),
+                "observed_segments": json.loads(row["observed_segments_json"]),
             }
             for row in event_rows
         ]
@@ -733,13 +791,23 @@ class SessionDatabase:
             evidence.append(item)
 
         representative_evidence = []
+        portraits = {item["track_id"]: item for item in evidence if item["evidence_key"] == "portrait"}
         represented_tracks = set()
         for item in evidence:
             track_id = item["track_id"]
+            if item["evidence_key"] == "portrait":
+                continue
             if track_id in represented_tracks:
                 continue
             represented_tracks.add(track_id)
-            representative_evidence.append(dict(item))
+            representative_evidence.append({
+                **item,
+                "thumbnail_filename": portraits.get(track_id, {}).get("filename"),
+            })
+        for track_id, item in portraits.items():
+            if track_id not in represented_tracks:
+                representative_evidence.append({**item, "thumbnail_filename": item["filename"]})
+        representative_evidence.sort(key=lambda item: item["track_id"])
 
         return {
             "session": metadata,

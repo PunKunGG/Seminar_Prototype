@@ -62,6 +62,7 @@ class PoseBehaviorTests(unittest.TestCase):
         sleeping = next(
             item for item in criteria if item["behavior"] == "sleeping"
         )
+        self.assertEqual(sleeping["label"], "ท่าเข้าข่ายหลับ")
         self.assertIn("ลืมตา/หลับตา", sleeping["limitation"])
         self.assertEqual(sleeping["confirmation_seconds"], 8.0)
 

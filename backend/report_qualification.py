@@ -6,13 +6,23 @@ from collections import defaultdict
 from person_tracking import ATTENTIVE_BEHAVIORS, BEHAVIOR_KEYS
 
 
-REPORT_POLICY = {
+REPORT_POLICY_V2 = {
     "version": 2,
     "minimum_behavior_seconds": 30,
     "duration_basis": "observed_time",
     "identity_scope": "position_within_session",
 }
+REPORT_POLICY = {
+    **REPORT_POLICY_V2,
+    "version": 3,
+    "minimum_behavior_seconds_by_behavior": {"sleeping": 120},
+}
 QUALIFICATION_TOLERANCE_SECONDS = 1e-9
+
+
+def minimum_behavior_seconds(policy, behavior):
+    overrides = policy.get("minimum_behavior_seconds_by_behavior", {}) if policy.get("version", 2) >= 3 else {}
+    return float(overrides.get(behavior, policy["minimum_behavior_seconds"]))
 
 
 def _totals():
@@ -36,7 +46,6 @@ def _finish(totals):
 
 
 def qualify_tracking(tracking, policy, period_seconds=300):
-    minimum = float(policy["minimum_behavior_seconds"])
     overall = _totals()
     by_track = defaultdict(_totals)
     periods = defaultdict(lambda: defaultdict(_totals))
@@ -44,6 +53,7 @@ def qualify_tracking(tracking, policy, period_seconds=300):
     for event in tracking.get("events", []):
         duration = float(event.get("observed_duration_seconds", event["duration_seconds"]))
         behavior = event["behavior"]
+        minimum = minimum_behavior_seconds(policy, behavior)
         if not math.isfinite(duration) or duration + QUALIFICATION_TOLERANCE_SECONDS < minimum:
             continue
         segments = event.get("observed_segments") or []

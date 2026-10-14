@@ -491,6 +491,17 @@ body:has(.session-dialog[open]) { overflow: hidden; }
 .report-portrait:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .evidence-dialog { width: min(52rem, calc(100% - 2rem)); }
 .evidence-full-image { width: 100%; max-height: calc(100dvh - 8rem); object-fit: contain; background: #f3f4f6; }
+.video-evidence-dialog { width: min(64rem, calc(100% - 2rem)); }
+.video-evidence-body { padding: 16px; display: grid; gap: 16px; min-width: 0; }
+#videoEvidencePlayer { width: 100%; aspect-ratio: 16 / 9; max-height: 60dvh; object-fit: contain; background: #000; }
+.video-evidence-controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.video-evidence-person { display: flex; align-items: center; gap: 12px; }
+#videoEvidencePortrait { width: 80px; height: 80px; object-fit: contain; background: #f3f4f6; }
+.video-evidence-selection { flex: 1; min-width: 200px; }
+.evidence-action { min-width: 160px; font-size: 12px; }
+.evidence-action button { padding: 6px 10px; color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 4px; white-space: nowrap; }
+.evidence-action button:focus-visible, #videoEvidenceReplay:focus-visible, #videoEvidenceSegment:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+#videoEvidenceReplay:disabled { opacity: .5; cursor: not-allowed; }
 #reportTrackingRows td { vertical-align: middle; }
 #reportTrackingTableWrapper th:nth-child(3),
 #reportTrackingRows td:nth-child(3) { min-width: 88px; white-space: nowrap; }
@@ -500,6 +511,8 @@ body:has(.session-dialog[open]) { overflow: hidden; }
 .pdf-report summary { display: block; list-style: none; }
 .pdf-report summary::-webkit-details-marker { display: none; }
 @media (max-width: 640px) {
+  .video-evidence-controls { align-items: stretch; flex-direction: column; }
+  .video-evidence-selection { min-width: 0; width: 100%; }
   #appContent { padding: 20px 16px; }
   #reportPageTitle { width: 100%; font-size: 20px; }
   #reportContent .grid-cols-2 { grid-template-columns: minmax(0, 1fr); }

@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -11,6 +12,7 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from video_source_policy import VideoSourcePolicy, is_path_inside
+from video_evidence import bind_video_source, open_bound_video
 
 
 def simple_filename_sanitizer(value):
@@ -79,6 +81,69 @@ class VideoSourcePolicyTests(unittest.TestCase):
             )
             self.assertIsNone(second_error)
             self.assertTrue(second.endswith("class_demo_20260802_093000_1.mp4"))
+
+    def test_rejects_escaped_source_links_unless_unrestricted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            allowed = os.path.join(directory, "allowed")
+            os.makedirs(allowed)
+            target = os.path.join(directory, "outside.mp4")
+            with open(target, "wb") as output:
+                output.write(b"video")
+            alias = os.path.join(allowed, "link.mp4")
+            open(alias, "wb").close()
+            policy = self.make_policy(allowed)
+            realpath = os.path.realpath
+            with patch("video_source_policy.os.path.realpath", side_effect=lambda path: realpath(target if path == alias else path)):
+                source, error = policy.normalize(alias)
+                self.assertIsNone(source)
+                self.assertIn("allowed directories", error)
+                source, error = policy.normalize(alias, allow_any_path=True)
+                self.assertIsNone(error)
+                self.assertEqual(source, realpath(target))
+                binding = bind_video_source(source)
+                handle, reason = open_bound_video(binding, [allowed], allow_any_path=True)
+                self.assertIsNone(reason)
+                with handle:
+                    self.assertEqual(handle.read(), b"video")
+
+    def test_contained_source_links_use_canonical_path_for_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "source.mp4")
+            with open(target, "wb") as output:
+                output.write(b"video")
+            alias = os.path.join(directory, "link.mp4")
+            open(alias, "wb").close()
+            policy = self.make_policy(directory)
+            realpath = os.path.realpath
+            with patch("video_source_policy.os.path.realpath", side_effect=lambda path: realpath(target if path == alias else path)):
+                source, error = policy.normalize(alias)
+                self.assertIsNone(error)
+                self.assertEqual(source, realpath(target))
+                binding = bind_video_source(source)
+                self.assertEqual(binding["path"], source)
+                handle, reason = open_bound_video(binding, [directory])
+                self.assertIsNone(reason)
+                with handle:
+                    self.assertEqual(handle.read(), b"video")
+
+    def test_configured_source_roots_are_resolved_like_evidence_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "source.mp4")
+            open(target, "wb").close()
+            root_alias = os.path.join(directory, "root-link")
+            os.makedirs(root_alias)
+            source_alias = os.path.join(root_alias, "source.mp4")
+            open(source_alias, "wb").close()
+            policy = self.make_policy(root_alias)
+            realpath = os.path.realpath
+            aliases = {root_alias: directory, source_alias: target}
+            with patch("video_source_policy.os.path.realpath", side_effect=lambda path: realpath(aliases.get(path, path))):
+                source, error = policy.normalize(source_alias)
+                self.assertIsNone(error)
+                self.assertEqual(source, realpath(target))
+                handle, reason = open_bound_video(bind_video_source(source), [root_alias])
+                self.assertIsNone(reason)
+                handle.close()
 
     def test_rejects_a_filename_sanitizer_that_escapes_upload_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:

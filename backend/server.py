@@ -10,7 +10,7 @@ import time
 from urllib.parse import quote
 
 import cv2
-from flask import Flask, jsonify, send_from_directory, Response, request, session
+from flask import Flask, jsonify, send_file, send_from_directory, Response, request, session
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
@@ -37,7 +37,7 @@ from person_tracking import (
     SessionTracker,
 )
 from session_database import SessionDatabase
-from report_qualification import REPORT_POLICY, qualify_tracking
+from report_qualification import REPORT_POLICY, minimum_behavior_seconds, qualify_tracking
 from supabase_archive import ArchiveError, SupabaseArchive
 from video_sampling import (
     aggregate_analyses,
@@ -48,6 +48,7 @@ from video_sampling import (
     summarize_report_history,
 )
 from video_source_policy import VideoSourcePolicy
+from video_evidence import bind_video_source, open_bound_video
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -451,8 +452,8 @@ def _analyze_frame_with_context(buf, frame, marker=None):
 
 def _new_session_tracker(metadata):
     report_options = {
-        "persistent_positions": (metadata.get("report_policy") or {}).get("version") == 2,
-        "record_observed_segments": (metadata.get("report_policy") or {}).get("version") == 2,
+        "persistent_positions": (metadata.get("report_policy") or {}).get("version") in (2, 3),
+        "record_observed_segments": (metadata.get("report_policy") or {}).get("version") in (2, 3),
     }
     if metadata.get("processing_mode") == "sampled":
         sample_fps = max(0.1, float(metadata.get("sample_fps") or 2.0))
@@ -1741,7 +1742,7 @@ def record_stats(
 
         # • แจ้งเตือนนักศึกษาหลับ
         if sleeping > 0:
-            msg = f"รอบวิเคราะห์ {session_label}: ตรวจพบนักศึกษาหลับ {sleeping} คน"
+            msg = f"รอบวิเคราะห์ {session_label}: ตรวจพบท่าเข้าข่ายหลับ {sleeping} คน"
             activity_log[lab_id].appendleft({"time": time_str, "type": "warning", "message": msg})
             _push_alert_unlocked(lab_id, "warning", msg)
 
@@ -1815,12 +1816,62 @@ def _build_export_data(lab_id):
         report_summary["avg_attention_rate"] = qualified["summary"]["attention_rate"]
         report_summary["report_attention_rate"] = qualified["summary"]["attention_rate"]
         methodology["attention_formula"] = "(เวลาตั้งใจเรียน + เวลายกมือที่ผ่านเกณฑ์) / เวลาพฤติกรรมทั้งหมดที่ผ่านเกณฑ์ x 100"
+        for criterion in methodology["criteria"]:
+            criterion["report_minimum_seconds"] = minimum_behavior_seconds(policy, criterion["behavior"])
         methodology["limitations"].extend([
-            "รายงานไม่นับช่วงพฤติกรรมที่มีเวลาตรวจจริงต่ำกว่า 30 วินาที และไม่ถือว่าช่วงที่ตัดออกเป็นตั้งใจเรียน",
+            f"เกณฑ์รายงาน: ท่าเข้าข่ายหลับอย่างน้อย {minimum_behavior_seconds(policy, 'sleeping'):g} วินาทีที่ตรวจจริง พฤติกรรมอื่นตามเกณฑ์รายพฤติกรรม ไม่ถือว่าช่วงที่ตัดออกเป็นตั้งใจเรียน",
             "คลิปแบบสุ่มช่วงสะสมเฉพาะเวลาที่ตรวจจริง ไม่ยืนยันพฤติกรรมต่อเนื่องระหว่างช่วงที่ไม่ได้ตรวจ",
             "Position ID ใช้ตำแหน่งภายในรอบ ไม่ยืนยันตัวบุคคลเมื่อสลับที่นั่ง และต้องใช้กล้องมุมคงที่",
         ])
     return result
+
+
+def _video_evidence_status(session_id, *, archived=False, source_type=None):
+    stored = session_database.get_session(session_id)
+    if stored is None:
+        reason = "webcam" if source_type == "webcam" else ("cloud_only" if archived else "unbound")
+        return {"available": False, "reason": reason}
+    if stored and stored.get("source_type") == "webcam":
+        return {"available": False, "reason": "webcam"}
+    handle, reason = open_bound_video(
+        session_database.video_source_binding(session_id), CONFIG.video_source_dirs,
+        allow_any_path=CONFIG.allow_any_video_path,
+    )
+    if handle is None:
+        return {"available": False, "reason": reason}
+    handle.close()
+    return {"available": True, "url": f"/api/sessions/{quote(session_id, safe='')}/video"}
+
+
+def _with_video_evidence(session_id, report, *, archived=False):
+    metadata = (report.get("tracking") or {}).get("session") or {}
+    return {**report, "video_evidence": _video_evidence_status(
+        session_id, archived=archived, source_type=metadata.get("source_type") or report.get("source_type"),
+    )}
+
+
+@app.get("/api/sessions/<session_id>/video")
+def get_session_video(session_id):
+    if not CONFIG.supabase_auth_enabled:
+        blocked = _require_local_source_access()
+        if blocked:
+            return blocked
+    if session_database.get_session(session_id) is None or not _owns_local_session(session_id):
+        return _no_store(jsonify({"error": "Analysis session not found"})), 404
+    binding = session_database.video_source_binding(session_id)
+    handle, reason = open_bound_video(binding, CONFIG.video_source_dirs, allow_any_path=CONFIG.allow_any_video_path)
+    if handle is None:
+        return _no_store(jsonify({"error": "Video evidence unavailable", "reason": reason})), 404
+    try:
+        response = send_file(handle, download_name=os.path.basename(binding["path"]), conditional=False)
+        response.content_length = os.fstat(handle.fileno()).st_size
+        response.headers["Accept-Ranges"] = "bytes"
+        response.make_conditional(request.environ, accept_ranges=True, complete_length=response.content_length)
+        response.call_on_close(handle.close)
+        return _no_store(response)
+    except Exception:
+        handle.close()
+        raise
 
 
 @app.route("/api/export/<lab_id>")
@@ -1838,9 +1889,9 @@ def export_lab_data(lab_id):
                 return jsonify({"error": "Archive is unavailable"}), 503
             archived = None
         if archived:
-            return _no_store(jsonify(archived))
+            return _no_store(jsonify(_with_video_evidence(lab_id, archived, archived=True)))
     if local is not None:
-        return _no_store(jsonify(_build_export_data(lab_id)))
+        return _no_store(jsonify(_with_video_evidence(lab_id, _build_export_data(lab_id))))
     return jsonify({"error": "Analysis session not found"}), 404
 
 
@@ -2137,6 +2188,7 @@ def set_source(lab_id, cam_id):
             ),
             reset_tracking=True,
             report_policy=REPORT_POLICY,
+            video_source_binding=bind_video_source(source) if isinstance(source, str) else None,
         )
     except Exception as error:
         return jsonify({

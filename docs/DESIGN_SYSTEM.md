@@ -15,3 +15,5 @@ Separate selected summary interval, state-confirmation time, and report-qualific
 Use the existing native `<dialog>` conventions: labelled title, accessible close icon, Escape support, focus restoration, and existing reduced-motion handling. Present an un-cropped full-frame player, an ID reference portrait, behavior label, and an observed-segment selector. Use a labelled replay command. Stop and unload media on close or leaving the report; do not autoplay on opening.
 
 Bound playback to the selected observed segment. Show gaps as gaps, not continuous detection. Show loading/error/unavailable messages without replacing valid report data. Stack controls on mobile; constrain the player and portrait to prevent horizontal page overflow. Evidence playback controls are not part of PDF/CSV/Excel output.
+
+The evidence table includes raw events that do not qualify for report metrics. Label counted and excluded events explicitly; inspecting an excluded event must not promote it into the report totals. When the browser reports a shorter duration than the observed segment end, play its available portion and state that its end is clamped to the media duration.

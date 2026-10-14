@@ -123,6 +123,42 @@ test("evidence segments preserve unsampled gaps and reject invalid offsets", () 
   assert.equal(vm.runInContext("evidenceTime(3661)", context), "1:01:01");
 });
 
+test("evidence playback clamps media end without discarding playable content", () => {
+  const { context } = dashboardContext();
+  for (const end of [10.01, 10.25, 15]) {
+    assert.equal(vm.runInContext(`JSON.stringify(playbackBounds({start: 9, end: ${end}}, 10))`, context), '{"start":9,"end":10}');
+  }
+  assert.equal(vm.runInContext("JSON.stringify(playbackBounds({start: 1, end: 5}, 10))", context), '{"start":1,"end":5}');
+  for (const start of [-1, 10, 11]) {
+    assert.equal(vm.runInContext(`playbackBounds({start: ${start}, end: 12}, 10)`, context), null);
+  }
+  assert.equal(vm.runInContext("playbackBounds({start: 1, end: 5}, NaN)", context), null);
+  assert.equal(vm.runInContext("playbackBounds({start: 1, end: 5}, Infinity)", context), null);
+});
+
+test("raw excluded events remain inspectable independently of qualified totals", () => {
+  const { context, elements } = dashboardContext();
+  elements.reportBehaviorEventsSection = { classList: { toggle() {} } };
+  elements.reportBehaviorEventRows = { innerHTML: "" };
+  elements.reportBehaviorEventsCaption = {};
+  const events = [
+    { track_id: 2, event_index: 1, behavior: "sleeping", duration_seconds: 90, observed_segments: [[10,100,90]] },
+    { track_id: 3, event_index: 1, behavior: "hand_raised", duration_seconds: 20, observed_segments: [[110,130,20]] },
+    { track_id: 4, event_index: 1, behavior: "attentive", duration_seconds: 60, observed_segments: [[140,200,60]] },
+  ];
+  context.fixture = { tracking: { events }, report_policy: { version: 3, minimum_behavior_seconds: 30, minimum_behavior_seconds_by_behavior: { sleeping: 120 } },
+    qualified_analysis: { summary: { attention_rate: 100 }, events: [events[2]] },
+    video_evidence: { available: true, url: "/api/sessions/round/video" } };
+  vm.runInContext("latestExportData=fixture; renderBehaviorEvents(reportEvidenceData())", context);
+  assert.equal((elements.reportBehaviorEventRows.innerHTML.match(/data-video-event=/g) || []).length, 3);
+  assert.match(elements.reportBehaviorEventRows.innerHTML, /ไม่คิดในรายงาน/);
+  assert.match(elements.reportBehaviorEventRows.innerHTML, /นับในรายงาน/);
+  assert.match(elements.reportBehaviorEventsCaption.textContent, /ผลตรวจดิบ/);
+  assert.equal(vm.runInContext("reportTrackingData().events.length", context), 1);
+  assert.equal(vm.runInContext("reportEvidenceData().events[1].track_id", context), 3);
+  assert.equal(vm.runInContext("latestExportData.qualified_analysis.summary.attention_rate", context), 100);
+});
+
 test("new report minimums do not rewrite legacy policy thresholds", () => {
   const { context } = dashboardContext();
   vm.runInContext("latestExportData = { report_policy: { version: 3, minimum_behavior_seconds: 30, minimum_behavior_seconds_by_behavior: { sleeping: 120 } } }", context);

@@ -323,6 +323,36 @@ class SessionApiTests(unittest.TestCase):
             response = self.client.get("/api/sessions/owned/video", environ_overrides={"REMOTE_ADDR": "203.0.113.10"})
         self.assertEqual(response.status_code, 403)
 
+    def test_unrestricted_video_sources_are_available_only_when_enabled(self):
+        from video_evidence import bind_video_source
+
+        path = os.path.join(self.directory.name, "outside.mp4")
+        with open(path, "wb") as output:
+            output.write(b"original-video")
+        database = self.server.session_database
+        database.upsert_session("outside-video", name="Outside", owner_id="teacher-a",
+                                room_name="Lab", course_name="AI", source_type="video", source_label="outside.mp4",
+                                video_source_binding=bind_video_source(path))
+        self.addCleanup(self._delete_test_session, "outside-video")
+        for enabled in (False, True):
+            config = replace(self.server.CONFIG, video_source_dirs=(os.path.join(self.directory.name, "allowed"),),
+                             allow_any_video_path=enabled)
+            with patch.object(self.server, "CONFIG", config):
+                report = self.client.get("/api/export/outside-video").json
+                self.assertEqual(report["video_evidence"]["available"], enabled)
+                with self.client.get("/api/sessions/outside-video/video", headers={"Range": "bytes=0-3"}) as response:
+                    self.assertEqual(response.status_code, 206 if enabled else 404)
+                    if enabled:
+                        self.assertEqual(response.data, b"orig")
+                    else:
+                        self.assertEqual(response.json["reason"], "invalid_source")
+                self.assertEqual(self.client.get("/api/sessions/foreign/video").status_code, 404)
+        with open(path, "wb") as output:
+            output.write(b"changed-source")
+        with patch.object(self.server, "CONFIG", config):
+            self.assertEqual(self.client.get("/api/export/outside-video").json["video_evidence"]["reason"], "changed")
+            self.assertEqual(self.client.get("/api/sessions/outside-video/video").status_code, 404)
+
     def test_report_explains_confirmation_summary_and_qualification_separately(self):
         from report_qualification import REPORT_POLICY, REPORT_POLICY_V2
 

@@ -1832,6 +1832,7 @@ def _video_evidence_status(session_id):
         return {"available": False, "reason": "webcam"}
     handle, reason = open_bound_video(
         session_database.video_source_binding(session_id), CONFIG.video_source_dirs,
+        allow_any_path=CONFIG.allow_any_video_path,
     )
     if handle is None:
         return {"available": False, "reason": reason}
@@ -1852,7 +1853,7 @@ def get_session_video(session_id):
     if session_database.get_session(session_id) is None or not _owns_local_session(session_id):
         return _no_store(jsonify({"error": "Analysis session not found"})), 404
     binding = session_database.video_source_binding(session_id)
-    handle, reason = open_bound_video(binding, CONFIG.video_source_dirs)
+    handle, reason = open_bound_video(binding, CONFIG.video_source_dirs, allow_any_path=CONFIG.allow_any_video_path)
     if handle is None:
         return _no_store(jsonify({"error": "Video evidence unavailable", "reason": reason})), 404
     try:

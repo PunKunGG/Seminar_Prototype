@@ -28,6 +28,14 @@ function evidenceTime(seconds) {
   return `${hours ? `${hours}:` : ""}${String(minutes).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
+function playbackBounds(segment, duration) {
+  if (!segment || !Number.isFinite(duration) || duration <= 0
+      || !Number.isFinite(segment.start) || !Number.isFinite(segment.end)
+      || segment.start < 0 || segment.start >= duration) return null;
+  const end = Math.min(segment.end, duration);
+  return end > segment.start ? { start: segment.start, end } : null;
+}
+
 function closeVideoEvidence() {
   const dialog = document.getElementById("videoEvidenceDialog");
   if (dialog?.open) dialog.close();
@@ -45,11 +53,8 @@ function setupVideoEvidenceViewer() {
     if (videoEvidenceAnimation != null) cancelAnimationFrame(videoEvidenceAnimation);
     videoEvidenceAnimation = null;
   };
-  const bounds = () => videoEvidenceState?.segments[Number(select.value)];
-  const validBounds = () => {
-    const segment = bounds();
-    return segment && Number.isFinite(player.duration) && segment.end <= player.duration + 0.05;
-  };
+  const bounds = () => playbackBounds(videoEvidenceState?.segments[Number(select.value)], player.duration);
+  const validBounds = () => Boolean(bounds());
   const enforceBounds = () => {
     const segment = bounds();
     if (!segment || !dialog.open || !validBounds()) return;
@@ -74,7 +79,8 @@ function setupVideoEvidenceViewer() {
     }
     player.currentTime = bounds().start;
     replay.disabled = false;
-    setStatus(`ตรวจจริง ${evidenceTime(bounds().start)} - ${evidenceTime(bounds().end)} ในคลิปต้นฉบับ`);
+    const clamped = bounds().end < videoEvidenceState.segments[Number(select.value)].end;
+    setStatus(`ตรวจจริง ${evidenceTime(bounds().start)} - ${evidenceTime(bounds().end)} ในคลิปต้นฉบับ${clamped ? " (จำกัดจุดจบตามความยาวคลิป)" : ""}`);
   };
   document.getElementById("videoEvidenceClose").addEventListener("click", closeVideoEvidence);
   dialog.addEventListener("close", () => {
@@ -121,7 +127,7 @@ function setupVideoEvidenceViewer() {
   document.getElementById("reportBehaviorEventRows").addEventListener("click", event => {
     const opener = event.target.closest("button[data-video-event]");
     if (!opener) return;
-    const tracking = reportTrackingData();
+    const tracking = reportEvidenceData();
     const behaviorEvent = tracking.events?.[Number(opener.dataset.videoEvent)];
     const segments = evidenceSegments(behaviorEvent);
     const url = latestExportData?.video_evidence?.url;

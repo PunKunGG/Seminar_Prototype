@@ -19,7 +19,7 @@ def bind_video_source(path):
     return {"path": resolved, "identity": file_identity(metadata)}
 
 
-def open_bound_video(binding, roots):
+def open_bound_video(binding, roots, *, allow_any_path=False):
     """Validate the actual open file, not just its name before a second open."""
     if not binding:
         return None, "unbound"
@@ -28,7 +28,7 @@ def open_bound_video(binding, roots):
         return None, "invalid_source"
     resolved = os.path.realpath(path)
     allowed = [os.path.realpath(root) for root in roots]
-    if resolved != path or not is_path_inside(resolved, allowed):
+    if resolved != path or (not allow_any_path and not is_path_inside(resolved, allowed)):
         return None, "invalid_source"
     try:
         handle = open(resolved, "rb")

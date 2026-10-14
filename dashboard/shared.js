@@ -111,6 +111,10 @@ function reportTrackingData(data = latestExportData) {
     : raw;
 }
 
+function reportEvidenceData(data = latestExportData) {
+  return data?.tracking || {};
+}
+
 function reportPeriodData(data = latestExportData) {
   if (!data?.qualified_analysis) return data?.periods || [];
   const qualified = new Map(data.qualified_analysis.periods.map(item => [item.start_seconds, item]));
@@ -342,12 +346,16 @@ function renderBehaviorEvents(tracking = null) {
   if (!section || !body || !caption) return;
 
   const events = tracking?.events || [];
+  const qualified = latestExportData?.qualified_analysis;
+  const eventKey = event => `${Number(event.track_id)}:${Number(event.event_index)}`;
+  const accepted = new Set((qualified?.events || []).map(eventKey));
   const displayLimit = 300;
   const visibleEvents = events.slice(0, displayLimit);
   section.classList.toggle("hidden", visibleEvents.length === 0);
-  caption.textContent = events.length > displayLimit
+  const countCaption = events.length > displayLimit
     ? `แสดง ${displayLimit} จาก ${events.length} ช่วง`
     : `${events.length} ช่วง`;
+  caption.textContent = `${countCaption} | ผลตรวจดิบ${qualified ? " รวมช่วงที่ไม่คิดในรายงาน" : ""}`;
   body.innerHTML = visibleEvents
     .map((event, index) => `
       <tr class="${index % 2 === 0 ? "bg-white" : "bg-gray-50"}">
@@ -357,6 +365,7 @@ function renderBehaviorEvents(tracking = null) {
         <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(behaviorLabel(event.behavior))}</td>
         <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(event.duration_seconds)}</td>
         <td class="px-3 py-2 text-right whitespace-nowrap">${formatDecimal(event.avg_confidence)}%</td>
+        <td class="px-3 py-2 text-xs ${qualified && !accepted.has(eventKey(event)) ? "text-gray-500" : "text-green-700"}">${qualified ? (accepted.has(eventKey(event)) ? "นับในรายงาน" : `ไม่คิดในรายงาน (ขั้นต่ำ ${formatDecimal(reportMinimumSeconds(event.behavior))} วินาทีที่ตรวจจริง)`) : "ผลตามเกณฑ์เดิม"}</td>
         <td class="px-3 py-2 evidence-action">${videoEvidenceAction(event, index)}</td>
       </tr>
     `)
@@ -1242,7 +1251,7 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
     );
     renderReportTimeline(periods, latestExportData.period_seconds);
     renderTrackingReport(tracking);
-    renderBehaviorEvents(tracking);
+    renderBehaviorEvents(reportEvidenceData());
     renderAnalysisMethodology(methodology);
     document.getElementById("reportContent").classList.remove("hidden");
     document.getElementById("reportDownloadActions").classList.remove("hidden");

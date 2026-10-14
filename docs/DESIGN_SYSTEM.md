@@ -10,6 +10,8 @@ Keep ID portraits at 80 by 80 pixels with fixed placeholders and existing image 
 
 Separate selected summary interval, state-confirmation time, and report-qualification minimum in methodology. A position-based ID must not be described as a verified identity. A sleeping pose must not be presented as confirmed eyelid closure.
 
+Use the non-definitive Thai sleeping-posture label consistently in live results, reports, evidence dialogs, methodology, and exports, including when displaying older archived labels. Retain the `sleeping` data key and historical numeric results unchanged.
+
 ## Video Evidence Dialog
 
 Use the existing native `<dialog>` conventions: labelled title, accessible close icon, Escape support, focus restoration, and existing reduced-motion handling. Present an un-cropped full-frame player, an ID reference portrait, behavior label, and an observed-segment selector. Use a labelled replay command. Stop and unload media on close or leaving the report; do not autoplay on opening.

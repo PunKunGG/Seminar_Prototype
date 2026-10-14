@@ -10,6 +10,7 @@ function evidenceSegments(event) {
 
 function videoUnavailableMessage(reason) {
   return { webcam: "เว็บแคมรอบนี้ไม่ได้บันทึกวิดีโอ", unbound: "รอบนี้ไม่มีคลิปต้นฉบับที่ผูกไว้",
+    cloud_only: "มีเฉพาะรายงานบนคลาวด์ ไม่มีคลิปต้นฉบับในเครื่องนี้",
     missing: "ไม่พบไฟล์คลิปบนเซิร์ฟเวอร์", changed: "ไฟล์คลิปเปลี่ยนจากต้นฉบับ",
     invalid_source: "ไฟล์อยู่นอกโฟลเดอร์ที่อนุญาต" }[reason] || "ไม่มีวิดีโอหลักฐานสำหรับรอบนี้";
 }

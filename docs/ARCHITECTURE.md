@@ -21,6 +21,8 @@ Persist the source reference and file identity in SQLite only when a new video r
 
 Report responses include additive `video_evidence` availability information and a session-scoped URL when available. Recompute this information for local and archived reports at request time. Cloud-only reports remain readable but cannot obtain unbound local footage.
 
+When the local round row is absent, use the archived source context for the unavailable reason: `webcam` for webcam footage that was not recorded, otherwise `cloud_only` for an archived report whose original footage is not present locally. Reserve `unbound` for local rounds without a persisted source binding; do not infer past binding history from an absent local row.
+
 The evidence table and player use raw events independently of qualified report totals, including events excluded by the duration policy. The browser uses numeric source offsets from `observed_segments`. It plays one observed segment at a time, clamps its end to the browser's finite media duration, stops at that end, and does not rerun inference. Segments starting outside the media cannot play. No video is embedded in exports or uploaded to Supabase. Unsupported codecs are surfaced without automatic transcoding.
 
 ## Compatibility

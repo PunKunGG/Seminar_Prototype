@@ -168,6 +168,41 @@ test("new report minimums do not rewrite legacy policy thresholds", () => {
   assert.equal(vm.runInContext("reportMinimumSeconds('sleeping')", context), 30);
 });
 
+test("sleeping labels stay non-definitive across reports, evidence and exports", () => {
+  const { context, elements } = dashboardContext();
+  for (const id of ["reportTrackingSection", "reportBehaviorEventsSection", "reportMethodologySection"]) {
+    elements[id] = { classList: { toggle() {} } };
+  }
+  for (const id of ["reportTrackingRows", "reportTrackingCaption", "reportBehaviorEventRows", "reportBehaviorEventsCaption",
+    "reportMethodologyRows", "reportMethodologyLimitations", "reportSummaryInterval"]) elements[id] = { innerHTML: "" };
+  elements.reportTrackingHead = { innerHTML: "", closest: () => ({ style: {} }) };
+  const rawEvent = { track_id: 1, event_index: 1, behavior: "sleeping", duration_seconds: 90, observed_segments: [[0,90,90]] };
+  const track = { track_id: 1, visible_seconds: 120, qualified_seconds: 120, attention_rate: 0, event_counts: { sleeping: 1 }, behavior_seconds: { sleeping: 120 } };
+  context.fixture = { lab_id: "round", summary: { total_records: 1, avg_people: 1, max_people: 1, report_total_people: 1, avg_attention_rate: 0 },
+    tracking: { session: { name: "Round" }, tracks: [track], events: [rawEvent] },
+    report_policy: { version: 3, minimum_behavior_seconds: 30, minimum_behavior_seconds_by_behavior: { sleeping: 120 } },
+    qualified_analysis: { summary: { behavior_seconds: { sleeping: 120 } }, tracks: [track], events: [], periods: [] },
+    video_evidence: { available: true, url: "/api/sessions/round/video" },
+    analysis_methodology: { realtime_summary_interval_seconds: 30, criteria: [{ behavior: "sleeping", label: "หลับ", confirmation_seconds: 8, report_minimum_seconds: 120 }] } };
+  vm.runInContext("latestExportData=fixture; renderTrackingReport(reportTrackingData()); renderBehaviorEvents(reportEvidenceData()); renderAnalysisMethodology(fixture.analysis_methodology)", context);
+  assert.equal(vm.runInContext("behaviorLabel('sleeping')", context), "ท่าเข้าข่ายหลับ");
+  assert.match(elements.reportTrackingHead.innerHTML, /ท่าเข้าข่ายหลับ/);
+  assert.match(elements.reportBehaviorEventRows.innerHTML, /ท่าเข้าข่ายหลับ/);
+  assert.match(elements.reportMethodologyRows.innerHTML, /ท่าเข้าข่ายหลับ/);
+  for (const format of ["csv", "excel"]) {
+    vm.runInContext(`downloadBlob=value=>{capturedExport=value;}; downloadReport('${format}')`, context);
+    assert.match(context.capturedExport, /ท่าเข้าข่ายหลับ \(ครั้ง\)/);
+    assert.doesNotMatch(context.capturedExport, /(?:>|\")หลับ(?:<|\"| \()/);
+  }
+  assert.equal(vm.runInContext("latestExportData.qualified_analysis.tracks[0].event_counts.sleeping", context), 1);
+});
+
+test("cloud-only footage explains storage availability instead of missing binding", () => {
+  const { context } = dashboardContext();
+  assert.match(vm.runInContext("videoUnavailableMessage('cloud_only')", context), /คลาวด์/);
+  assert.notEqual(vm.runInContext("videoUnavailableMessage('cloud_only')", context), vm.runInContext("videoUnavailableMessage('unbound')", context));
+});
+
 test("video actions explain unavailable sources instead of guessing a clip", () => {
   const { context } = dashboardContext();
   vm.runInContext("latestExportData = { video_evidence: { available: false, reason: 'changed' } }", context);

@@ -1819,15 +1819,18 @@ def _build_export_data(lab_id):
         for criterion in methodology["criteria"]:
             criterion["report_minimum_seconds"] = minimum_behavior_seconds(policy, criterion["behavior"])
         methodology["limitations"].extend([
-            f"เกณฑ์รายงาน: หลับอย่างน้อย {minimum_behavior_seconds(policy, 'sleeping'):g} วินาทีที่ตรวจจริง พฤติกรรมอื่นตามเกณฑ์รายพฤติกรรม ไม่ถือว่าช่วงที่ตัดออกเป็นตั้งใจเรียน",
+            f"เกณฑ์รายงาน: ท่าเข้าข่ายหลับอย่างน้อย {minimum_behavior_seconds(policy, 'sleeping'):g} วินาทีที่ตรวจจริง พฤติกรรมอื่นตามเกณฑ์รายพฤติกรรม ไม่ถือว่าช่วงที่ตัดออกเป็นตั้งใจเรียน",
             "คลิปแบบสุ่มช่วงสะสมเฉพาะเวลาที่ตรวจจริง ไม่ยืนยันพฤติกรรมต่อเนื่องระหว่างช่วงที่ไม่ได้ตรวจ",
             "Position ID ใช้ตำแหน่งภายในรอบ ไม่ยืนยันตัวบุคคลเมื่อสลับที่นั่ง และต้องใช้กล้องมุมคงที่",
         ])
     return result
 
 
-def _video_evidence_status(session_id):
+def _video_evidence_status(session_id, *, archived=False, source_type=None):
     stored = session_database.get_session(session_id)
+    if stored is None:
+        reason = "webcam" if source_type == "webcam" else ("cloud_only" if archived else "unbound")
+        return {"available": False, "reason": reason}
     if stored and stored.get("source_type") == "webcam":
         return {"available": False, "reason": "webcam"}
     handle, reason = open_bound_video(
@@ -1840,8 +1843,11 @@ def _video_evidence_status(session_id):
     return {"available": True, "url": f"/api/sessions/{quote(session_id, safe='')}/video"}
 
 
-def _with_video_evidence(session_id, report):
-    return {**report, "video_evidence": _video_evidence_status(session_id)}
+def _with_video_evidence(session_id, report, *, archived=False):
+    metadata = (report.get("tracking") or {}).get("session") or {}
+    return {**report, "video_evidence": _video_evidence_status(
+        session_id, archived=archived, source_type=metadata.get("source_type") or report.get("source_type"),
+    )}
 
 
 @app.get("/api/sessions/<session_id>/video")
@@ -1883,7 +1889,7 @@ def export_lab_data(lab_id):
                 return jsonify({"error": "Archive is unavailable"}), 503
             archived = None
         if archived:
-            return _no_store(jsonify(_with_video_evidence(lab_id, archived)))
+            return _no_store(jsonify(_with_video_evidence(lab_id, archived, archived=True)))
     if local is not None:
         return _no_store(jsonify(_with_video_evidence(lab_id, _build_export_data(lab_id))))
     return jsonify({"error": "Analysis session not found"}), 404

@@ -860,7 +860,7 @@ def analyze_frame(
     h, w = annotated_frame.shape[:2]
     hud = (f"Attention {attention_rate}%  |  "
            f"Students: {total_people}  |  "
-           f"Sleeping: {behavior_counts['sleeping']}  |  "
+           f"Sleep-like: {behavior_counts['sleeping']}  |  "
            f"Down: {behavior_counts['looking_down']}  |  "
            f"Phone: {behavior_counts['phone_use']}  |  "
            f"Phone?: {behavior_counts['phone_suspected']}  |  "
@@ -904,7 +904,7 @@ def get_behavior_measurement_criteria(transition_seconds=None):
         },
         {
             "behavior": "sleeping",
-            "label": "หลับ",
+            "label": get_behavior_label_th("sleeping"),
             "measurement": (
                 "จมูกอยู่ต่ำใกล้แนวไหล่ (สัดส่วนไม่เกิน 0.10 ของความกว้างไหล่) "
                 "ร่วมกับลำตัวพับหรือเอนมาก"

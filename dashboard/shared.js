@@ -150,7 +150,7 @@ function reportPortrait(track, image) {
 function behaviorLabel(value) {
   return {
     attentive: "ตั้งใจเรียน",
-    sleeping: "หลับ",
+    sleeping: "ท่าเข้าข่ายหลับ",
     looking_down: "ก้มหน้า",
     phone_use: "ใช้โทรศัพท์",
     phone_suspected: "สงสัยใช้โทรศัพท์",
@@ -219,7 +219,7 @@ function renderLiveTracks(tracks = []) {
       return `
         <tr class="border-t border-gray-100">
           <td class="px-3 py-2 font-semibold text-blue-700 whitespace-nowrap">ID ${toWholePeople(track.track_id)}</td>
-          <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(track.current_behavior === "sleeping" ? "ท่าเข้าข่ายหลับ" : behaviorLabel(track.current_behavior))}</td>
+          <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(behaviorLabel(track.current_behavior))}</td>
           <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(track.visible_seconds)}</td>
           <td class="px-3 py-2 text-right font-semibold text-green-700">${formatDecimal(track.attention_rate)}%</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.sleeping)}</td>
@@ -289,7 +289,7 @@ function renderAnalysisMethodology(methodology = null) {
   body.innerHTML = criteria
     .map((item, index) => `
       <tr class="${index % 2 === 0 ? "bg-white" : "bg-gray-50"}">
-        <td class="px-3 py-2 font-semibold text-gray-800 whitespace-nowrap">${escapeHtml(item.label || behaviorLabel(item.behavior))}</td>
+        <td class="px-3 py-2 font-semibold text-gray-800 whitespace-nowrap">${escapeHtml(item.behavior === "sleeping" ? behaviorLabel(item.behavior) : item.label || behaviorLabel(item.behavior))}</td>
         <td class="px-3 py-2 text-gray-700">
           <p>${escapeHtml(item.measurement || "-")}</p>
           <p class="mt-1 text-gray-500">เกณฑ์: ${escapeHtml(item.decision_rule || "-")}</p>
@@ -1051,7 +1051,7 @@ function appendTrackingExportRows(rows) {
       ["ช่วงสรุปที่เลือก (วินาที)", methodology.realtime_summary_interval_seconds],
       ["พฤติกรรม", "สิ่งที่วัด", "เกณฑ์ตัดสิน", "ยืนยันก่อนเปลี่ยนสถานะ (วินาที)", "ขั้นต่ำในรายงาน (วินาทีที่ตรวจจริง)", "ข้อจำกัด"]);
     for (const item of methodology.criteria) {
-      rows.push([item.label || behaviorLabel(item.behavior), item.measurement,
+      rows.push([item.behavior === "sleeping" ? behaviorLabel(item.behavior) : item.label || behaviorLabel(item.behavior), item.measurement,
         item.decision_rule, item.confirmation_seconds,
         item.report_minimum_seconds ?? (latestExportData.report_policy ? reportMinimumSeconds(item.behavior) : "ไม่คัดช่วง"), item.limitation]);
     }
@@ -1073,7 +1073,7 @@ function buildExportRows(data) {
     ["จำนวนบันทึกทั้งหมด", data.total_records], [],
     [data.behavior_scope || "ภาพรวมพฤติกรรม"],
     ...[
-      ["ตั้งใจเรียน", "attentive"], ["หลับ", "sleeping"],
+      ["ตั้งใจเรียน", "attentive"], [behaviorLabel("sleeping"), "sleeping"],
       ["ก้มหน้า", "looking_down"], ["ใช้โทรศัพท์", "phone_use"],
       ["สงสัยใช้โทรศัพท์", "phone_suspected"], ["ยกมือ", "hand_raised"],
       ["ยืน/ลุก", "standing"], ["ไม่ชัดเจน", "unknown"],
@@ -1082,14 +1082,14 @@ function buildExportRows(data) {
   ];
   if (latestExportData?.report_policy) {
     rows.push(["เกณฑ์ขั้นต่ำ (วินาที)", latestExportData.report_policy.minimum_behavior_seconds]);
-    rows.push(["เกณฑ์หลับ (วินาทีที่ตรวจจริง)", reportMinimumSeconds("sleeping")]);
+    rows.push([`เกณฑ์${behaviorLabel("sleeping")} (วินาทีที่ตรวจจริง)`, reportMinimumSeconds("sleeping")]);
     rows.push(["ระยะเวลา", "รวมเวลาตรวจจริงของทุก ID ไม่รวมช่วงที่ไม่ได้ตรวจ"]);
   }
   const periods = reportPeriodData();
   if (periods.length) {
     rows.push([], ["สรุปตามช่วงเวลา"], [
       "ช่วงเวลา", "คนเฉลี่ย", "ความตั้งใจ (%)",
-      ...["ตั้งใจเรียน", "หลับ", "ก้มหน้า", "โทรศัพท์", "สงสัยโทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"]
+      ...["ตั้งใจเรียน", behaviorLabel("sleeping"), "ก้มหน้า", "โทรศัพท์", "สงสัยโทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"]
         .map(label => `${label} (${unit})`),
     ]);
     for (const period of periods) {
@@ -1102,7 +1102,7 @@ function buildExportRows(data) {
   appendTrackingExportRows(rows);
   if (!latestExportData?.qualified_analysis && latestExportData?.history?.length) {
     rows.push([], ["ข้อมูลย้อนหลัง"], ["เวลา", "ความตั้งใจ (%)", "จำนวนคน",
-      "ตั้งใจเรียน", "หลับ", "ก้มหน้า", "โทรศัพท์", "สงสัยโทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"]);
+      "ตั้งใจเรียน", behaviorLabel("sleeping"), "ก้มหน้า", "โทรศัพท์", "สงสัยโทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"]);
     for (const item of latestExportData.history) {
       rows.push([item.time, item.attention_rate, item.total_people,
         ...["attentive", "sleeping", "looking_down", "phone_use", "phone_suspected", "hand_raised", "standing", "unknown"]
@@ -1243,7 +1243,7 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
       header.textContent = `${header.dataset.behaviorLabel}${qualified ? " (นาที)" : ""}`;
     });
     set("reportPolicyCaption", qualified
-      ? `เกณฑ์รายงาน: หลับ ${formatDecimal(reportMinimumSeconds("sleeping"))} วินาทีที่ตรวจจริง พฤติกรรมอื่น ${formatDecimal(latestExportData.report_policy?.minimum_behavior_seconds ?? 30)} วินาที | ไม่นับช่องว่างระหว่างช่วงตรวจ | ID อิงตำแหน่งภายในรอบ ไม่ยืนยันตัวบุคคล`
+      ? `เกณฑ์รายงาน: ${behaviorLabel("sleeping")} ${formatDecimal(reportMinimumSeconds("sleeping"))} วินาทีที่ตรวจจริง พฤติกรรมอื่น ${formatDecimal(latestExportData.report_policy?.minimum_behavior_seconds ?? 30)} วินาที | ไม่นับช่องว่างระหว่างช่วงตรวจ | ID อิงตำแหน่งภายในรอบ ไม่ยืนยันตัวบุคคล`
       : "รายงานเดิม: ใช้เกณฑ์ของรอบที่บันทึกไว้");
     set(
       "reportLatestAttention",

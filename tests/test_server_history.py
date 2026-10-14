@@ -323,6 +323,25 @@ class SessionApiTests(unittest.TestCase):
             response = self.client.get("/api/sessions/owned/video", environ_overrides={"REMOTE_ADDR": "203.0.113.10"})
         self.assertEqual(response.status_code, 403)
 
+    def test_cloud_only_video_reasons_use_archived_source_context(self):
+        for metadata, expected_reason in (
+            ({"tracking": {"session": {"source_type": "video"}}}, "cloud_only"),
+            ({"tracking": {"session": {"source_type": "webcam"}}}, "webcam"),
+            ({"source_type": "webcam"}, "webcam"),
+            ({}, "cloud_only"),
+        ):
+            with self.subTest(metadata=metadata):
+                report = {"lab_id": "archived-only", **metadata,
+                          "video_evidence": {"available": True, "url": "/stale/video"}}
+                archive = types.SimpleNamespace(get_report=lambda owner, session_id: report)
+                with (
+                    patch.object(self.server, "supabase_archive", archive),
+                    patch.object(self.server.session_database, "video_source_binding", side_effect=AssertionError("No local row has no source binding")),
+                ):
+                    response = self.client.get("/api/export/archived-only")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json["video_evidence"], {"available": False, "reason": expected_reason})
+
     def test_unrestricted_video_sources_are_available_only_when_enabled(self):
         from video_evidence import bind_video_source
 

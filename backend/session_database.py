@@ -207,6 +207,7 @@ class SessionDatabase:
                 ("recording_ended_at", "TEXT"),
                 ("analysis_interval_seconds", "INTEGER NOT NULL DEFAULT 30"),
                 ("report_policy_json", "TEXT"),
+                ("video_source_json", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(
@@ -246,6 +247,7 @@ class SessionDatabase:
         recording_started_at=None,
         reset_tracking=False,
         report_policy=None,
+        video_source_binding=None,
     ):
         session_id = _clean_text(session_id, max_length=160)
         if not session_id:
@@ -296,6 +298,18 @@ class SessionDatabase:
                     "UPDATE class_sessions SET report_policy_json = ? WHERE id = ?",
                     (json.dumps(report_policy), session_id),
                 )
+            if reset_tracking or video_source_binding is not None:
+                connection.execute(
+                    "UPDATE class_sessions SET video_source_json = ? WHERE id = ?",
+                    (json.dumps(video_source_binding) if video_source_binding else None, session_id),
+                )
+
+    def video_source_binding(self, session_id):
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT video_source_json FROM class_sessions WHERE id = ?", (session_id,),
+            ).fetchone()
+        return json.loads(row["video_source_json"]) if row and row["video_source_json"] else None
 
     def sync_tracking(self, session_id, tracks):
         if not tracks:
@@ -495,8 +509,11 @@ class SessionDatabase:
                 FROM class_sessions AS sessions
                 LEFT JOIN behavior_events AS events
                     ON events.session_id = sessions.id
-                    AND events.duration_seconds + ? >= CAST(json_extract(
-                        sessions.report_policy_json, '$.minimum_behavior_seconds'
+                    AND events.duration_seconds + ? >= CAST(COALESCE(
+                        CASE WHEN json_extract(sessions.report_policy_json, '$.version') >= 3
+                        THEN json_extract(sessions.report_policy_json,
+                            '$.minimum_behavior_seconds_by_behavior.' || events.behavior) END,
+                        json_extract(sessions.report_policy_json, '$.minimum_behavior_seconds')
                     ) AS REAL)
                     AND events.duration_seconds < ?
                     AND json_array_length(events.observed_segments_json) > 0

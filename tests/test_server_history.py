@@ -4,6 +4,7 @@ import tempfile
 import types
 import unittest
 from datetime import datetime, timezone
+from dataclasses import replace
 from unittest.mock import patch
 
 
@@ -276,6 +277,70 @@ class SessionApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_video_range_authorization_and_report_availability(self):
+        from video_evidence import bind_video_source
+
+        path = os.path.join(self.directory.name, "test-video.mp4")
+        with open(path, "wb") as output:
+            output.write(b"0123456789abcdef")
+        database = self.server.session_database
+        database.upsert_session("bound-video", name="Bound", owner_id="teacher-a",
+                                room_name="Lab", course_name="AI", source_type="video", source_label="test-video.mp4",
+                                video_source_binding=bind_video_source(path))
+        self.addCleanup(self._delete_test_session, "bound-video")
+        config = replace(self.server.CONFIG, video_source_dirs=(self.directory.name,))
+        with patch.object(self.server, "CONFIG", config):
+            for byte_range, expected in (("bytes=0-3", b"0123"), ("bytes=-4", b"cdef")):
+                with self.client.get("/api/sessions/bound-video/video", headers={"Range": byte_range}) as response:
+                    self.assertEqual(response.status_code, 206)
+                    self.assertEqual(response.data, expected)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+            with self.client.get("/api/sessions/bound-video/video", headers={"Range": "bytes=100-200"}) as response:
+                self.assertEqual(response.status_code, 416)
+            report = self.client.get("/api/export/bound-video").json
+            self.assertTrue(report["video_evidence"]["available"])
+            self.assertNotIn("video_source_json", str(report))
+            self.assertNotIn(path, str(report))
+            self.assertEqual(self.client.get("/api/sessions/foreign/video").status_code, 404)
+            with self.client.session_transaction() as browser_session:
+                browser_session.clear()
+            self.assertEqual(self.client.get("/api/sessions/bound-video/video").status_code, 401)
+            self.setUp()
+            with open(path, "wb") as output:
+                output.write(b"changed")
+            self.assertEqual(self.client.get("/api/export/bound-video").json["video_evidence"]["reason"], "changed")
+            self.assertEqual(self.client.get("/api/sessions/bound-video/video").status_code, 404)
+            os.remove(path)
+            self.assertEqual(self.client.get("/api/export/bound-video").json["video_evidence"]["reason"], "missing")
+
+    def test_video_availability_is_recomputed_for_archived_reports_and_unbound_sources(self):
+        archive = types.SimpleNamespace(get_report=lambda owner, session_id: {"lab_id": session_id, "video_evidence": {"available": True}})
+        with patch.object(self.server, "supabase_archive", archive):
+            self.assertEqual(self.client.get("/api/export/owned").json["video_evidence"], {"available": False, "reason": "unbound"})
+            self.assertFalse(self.client.get("/api/export/cloud-only").json["video_evidence"]["available"])
+        no_auth = replace(self.server.CONFIG, supabase_auth_enabled=False, allow_remote_source_control=False)
+        with patch.object(self.server, "CONFIG", no_auth):
+            response = self.client.get("/api/sessions/owned/video", environ_overrides={"REMOTE_ADDR": "203.0.113.10"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_report_explains_confirmation_summary_and_qualification_separately(self):
+        from report_qualification import REPORT_POLICY, REPORT_POLICY_V2
+
+        for policy in (REPORT_POLICY_V2, REPORT_POLICY):
+            for interval in (15, 30, 60):
+                session_id = f"criteria-{policy['version']}-{interval}"
+                self.server.session_database.upsert_session(
+                    session_id, name=session_id, owner_id="teacher-a", room_name="Lab", course_name="AI",
+                    source_type="video", source_label="clip.mp4", analysis_interval_seconds=interval, report_policy=policy,
+                )
+                self.addCleanup(self._delete_test_session, session_id)
+                with patch.object(self.server, "get_behavior_measurement_criteria", return_value=[{"behavior": "sleeping", "confirmation_seconds": 8}]):
+                    report = self.client.get(f"/api/export/{session_id}").json
+                methodology = report["analysis_methodology"]
+                self.assertEqual(methodology["realtime_summary_interval_seconds"], interval)
+                self.assertEqual(methodology["criteria"][0]["confirmation_seconds"], 8)
+                self.assertEqual(methodology["criteria"][0]["report_minimum_seconds"], 120 if policy["version"] == 3 else 30)
+
     def test_analysis_interval_rejects_values_outside_bounds(self):
         for interval in (14, 301):
             with self.subTest(interval=interval):
@@ -299,6 +364,7 @@ class SessionApiTests(unittest.TestCase):
         cv2 = sys.modules["cv2"]
         with (
             patch.object(self.server, "_normalize_video_source", return_value=("clip.mp4", None)),
+            patch.object(self.server, "bind_video_source", return_value={"path": "clip.mp4", "identity": {}}),
             patch.object(self.server, "_stop_capture"),
             patch.object(self.server, "_start_capture", return_value={}),
             patch.object(cv2, "VideoCapture", return_value=Capture(), create=True),

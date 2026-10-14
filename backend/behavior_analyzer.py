@@ -1025,7 +1025,7 @@ def get_behavior_measurement_criteria(transition_seconds=None):
 def get_behavior_label_th(behavior: str) -> str:
     return {
         "attentive":    "ตั้งใจเรียน",
-        "sleeping":     "หลับ",
+        "sleeping":     "ท่าเข้าข่ายหลับ",
         "looking_down": "ก้มหน้า",
         "phone_use":    "ใช้โทรศัพท์",
         "phone_suspected": "สงสัยใช้โทรศัพท์",
@@ -1038,7 +1038,7 @@ def get_behavior_label_th(behavior: str) -> str:
 def get_behavior_label_en(behavior: str) -> str:
     return {
         "attentive":    "Attentive",
-        "sleeping":     "Sleeping",
+        "sleeping":     "Sleep-like",
         "looking_down": "Looking Down",
         "phone_use":    "Phone Use",
         "phone_suspected": "Phone Suspected",

@@ -70,7 +70,7 @@ function getReportBehavior(summary = {}) {
 }
 
 function getReportBehaviorTitle(summary = {}) {
-  if (latestExportData?.qualified_analysis) return "พฤติกรรมที่ผ่านเกณฑ์ (นาทีรวมทุกตำแหน่ง)";
+  if (latestExportData?.qualified_analysis) return "พฤติกรรมที่ผ่านเกณฑ์ (นาทีรวมทุก ID)";
   if (summary.report_summary_scope !== "peak_concurrent_people") {
     return "ภาพรวมพฤติกรรม";
   }
@@ -107,7 +107,7 @@ function formatAttention(value) {
 function reportTrackingData(data = latestExportData) {
   const raw = data?.tracking || {};
   return data?.qualified_analysis
-    ? { ...raw, ...data.qualified_analysis, is_qualified: true }
+    ? { ...raw, ...data.qualified_analysis, is_qualified: true, report_policy: data.report_policy }
     : raw;
 }
 
@@ -185,8 +185,15 @@ function formatRecordingPeriod(session = {}) {
   return `${startLabel} - ${endLabel}${durationLabel}`;
 }
 
+function reportMinimumSeconds(behavior) {
+  const policy = latestExportData?.report_policy;
+  const override = policy?.version >= 3 ? policy.minimum_behavior_seconds_by_behavior?.[behavior] : null;
+  return Number(override ?? policy?.minimum_behavior_seconds ?? 30);
+}
+
 function formatBehaviorMetric(track, behavior) {
   const count = toWholePeople(track?.event_counts?.[behavior]);
+  if (!count) return "-";
   const seconds = track?.behavior_seconds?.[behavior];
   const duration = track?.qualified_seconds != null
     ? `${formatDecimal((Number(seconds) || 0) / 60)} นาที` : formatDuration(seconds);
@@ -208,7 +215,7 @@ function renderLiveTracks(tracks = []) {
       return `
         <tr class="border-t border-gray-100">
           <td class="px-3 py-2 font-semibold text-blue-700 whitespace-nowrap">ID ${toWholePeople(track.track_id)}</td>
-          <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(behaviorLabel(track.current_behavior))}</td>
+          <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(track.current_behavior === "sleeping" ? "ท่าเข้าข่ายหลับ" : behaviorLabel(track.current_behavior))}</td>
           <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(track.visible_seconds)}</td>
           <td class="px-3 py-2 text-right font-semibold text-green-700">${formatDecimal(track.attention_rate)}%</td>
           <td class="px-3 py-2 text-right">${toWholePeople(counts.sleeping)}</td>
@@ -230,8 +237,14 @@ function renderTrackingReport(tracking = null) {
 
   const rows = tracking?.tracks || [];
   const images = representativeImages(tracking || {});
+  const keys = ["attentive", "sleeping", "looking_down", "phone_use", "phone_suspected", "hand_raised", "standing", "unknown"]
+    .filter(key => rows.some(track => toWholePeople(track.event_counts?.[key]) > 0));
+  const head = document.getElementById("reportTrackingHead");
+  if (head) head.innerHTML = `<tr><th class="px-3 py-2 text-center">ภาพ / ID</th><th class="px-3 py-2 text-right">เวลาวิเคราะห์รวม</th><th class="px-3 py-2 text-right">ตั้งใจ (%)</th>${keys.map(key => `<th class="px-3 py-2 text-right">${escapeHtml(behaviorLabel(key))}</th>`).join("")}</tr>`;
+  const table = head?.closest("table");
+  if (table) table.style.minWidth = `${Math.max(520, 320 + keys.length * 100)}px`;
   setTextIfPresent("reportTrackingCaption", tracking?.is_qualified
-    ? "จำนวนครั้ง / เวลาที่ผ่านเกณฑ์ 30 วินาที" : "จำนวนครั้ง / ระยะเวลาที่วิเคราะห์ได้ตลอดคาบ");
+    ? (keys.length ? "จำนวนครั้ง / เวลาที่ผ่านเกณฑ์รายพฤติกรรม" : "ไม่มีช่วงพฤติกรรมผ่านเกณฑ์รายงาน") : "จำนวนครั้ง / ระยะเวลาที่วิเคราะห์ได้ตลอดคาบ");
 
   section.classList.toggle("hidden", rows.length === 0);
   body.innerHTML = rows
@@ -241,15 +254,8 @@ function renderTrackingReport(tracking = null) {
         <tr class="${rowClass}">
           <td class="px-3 py-2 font-semibold text-blue-700 text-center whitespace-nowrap">${reportPortrait(track, images.get(Number(track.track_id)))}<span class="block mt-1">ID ${toWholePeople(track.track_id)}</span></td>
           <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(track.visible_seconds)}${tracking.is_qualified ? `<span class="block mt-1 text-gray-500">ผ่านเกณฑ์ ${formatDuration(track.qualified_seconds)}</span>` : ""}</td>
-          <td class="px-3 py-2 text-right font-semibold text-green-700">${formatAttention(track.attention_rate)}${tracking.is_qualified && track.attention_rate == null ? '<span class="block mt-1 font-normal text-gray-500" title="ไม่มีช่วงพฤติกรรมที่ผ่านเกณฑ์ 30 วินาที">เวลาไม่พอ</span>' : ""}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "attentive")}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "sleeping")}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "looking_down")}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "phone_use")}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "phone_suspected")}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "hand_raised")}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "standing")}</td>
-          <td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, "unknown")}</td>
+          <td class="px-3 py-2 text-right font-semibold text-green-700">${formatAttention(track.attention_rate)}${tracking.is_qualified && track.attention_rate == null ? '<span class="block mt-1 font-normal text-gray-500" title="ไม่มีช่วงพฤติกรรมที่ผ่านเกณฑ์รายงาน">เวลาไม่พอ</span>' : ""}</td>
+          ${keys.map(key => `<td class="px-3 py-2 text-right whitespace-nowrap">${formatBehaviorMetric(track, key)}</td>`).join("")}
         </tr>
       `;
     })
@@ -263,6 +269,8 @@ function renderAnalysisMethodology(methodology = null) {
   if (!section || !body || !limitations) return;
 
   const criteria = methodology?.criteria || [];
+  setTextIfPresent("reportSummaryInterval", methodology
+    ? `ช่วงสรุปผลที่เลือก: ${formatDecimal(methodology.realtime_summary_interval_seconds)} วินาที (แยกจากเวลายืนยันสถานะและเกณฑ์รายงาน)` : "");
   section.classList.toggle("hidden", criteria.length === 0);
   setTextIfPresent(
     "reportAttentionFormula",
@@ -283,6 +291,7 @@ function renderAnalysisMethodology(methodology = null) {
           <p class="mt-1 text-gray-500">เกณฑ์: ${escapeHtml(item.decision_rule || "-")}</p>
         </td>
         <td class="px-3 py-2 text-right whitespace-nowrap">${formatDecimal(item.confirmation_seconds)} วินาที</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">${item.report_minimum_seconds != null ? `${formatDecimal(item.report_minimum_seconds)} วินาทีที่ตรวจจริง` : (latestExportData?.report_policy ? `${formatDecimal(reportMinimumSeconds(item.behavior))} วินาทีที่ตรวจจริง` : "ไม่คัดช่วง")}</td>
         <td class="px-3 py-2 text-gray-600">${escapeHtml(item.limitation || "-")}</td>
       </tr>
     `)
@@ -348,6 +357,7 @@ function renderBehaviorEvents(tracking = null) {
         <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(behaviorLabel(event.behavior))}</td>
         <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(event.duration_seconds)}</td>
         <td class="px-3 py-2 text-right whitespace-nowrap">${formatDecimal(event.avg_confidence)}%</td>
+        <td class="px-3 py-2 evidence-action">${videoEvidenceAction(event, index)}</td>
       </tr>
     `)
     .join("");
@@ -1003,8 +1013,8 @@ function appendTrackingExportRows(rows) {
     ["เวลาสิ้นสุด", session.recording_ended_at || session.ended_at || "-"]);
   const keys = ["attentive", "sleeping", "looking_down", "phone_use", "phone_suspected", "hand_raised", "standing", "unknown"];
   const images = representativeImages(tracking);
-  rows.push([], ["สรุปตามรหัสตำแหน่ง (Position ID)"], [
-    "รหัสตำแหน่ง", "ภาพ", "เวลาตรวจพบรวม (วินาที)",
+  rows.push([], ["สรุปตามบุคคล (ID)"], [
+    "ID ภายในรอบ", "ภาพ", "เวลาตรวจพบรวม (วินาที)",
     ...(tracking.is_qualified ? ["เวลาที่ผ่านเกณฑ์ (วินาที)"] : []),
     "ความตั้งใจ (%)",
     ...keys.flatMap(key => [`${behaviorLabel(key)} (ครั้ง)`, `${behaviorLabel(key)} (วินาที)`]),
@@ -1019,8 +1029,8 @@ function appendTrackingExportRows(rows) {
     ]);
   }
   if (tracking.events?.length) {
-    rows.push([], ["ช่วงพฤติกรรมตามตำแหน่ง"],
-      ["รหัสตำแหน่ง", "เวลาเริ่ม", "เวลาสิ้นสุด", "พฤติกรรม", "ระยะเวลา (วินาที)", "ความมั่นใจ (%)"]);
+    rows.push([], ["ช่วงพฤติกรรมรายบุคคล"],
+      ["ID ภายในรอบ", "เวลาเริ่ม", "เวลาสิ้นสุด", "พฤติกรรม", "ระยะเวลา (วินาที)", "ความมั่นใจ (%)"]);
     for (const event of tracking.events) {
       rows.push([`ID ${event.track_id}`, event.start_time, event.end_time,
         behaviorLabel(event.behavior), event.duration_seconds, event.avg_confidence]);
@@ -1029,10 +1039,12 @@ function appendTrackingExportRows(rows) {
   const methodology = latestExportData?.analysis_methodology;
   if (methodology?.criteria?.length) {
     rows.push([], ["เกณฑ์การวัดพฤติกรรมและข้อจำกัด"], ["สูตรอัตราความตั้งใจ", methodology.attention_formula],
-      ["พฤติกรรม", "สิ่งที่วัด", "เกณฑ์ตัดสิน", "ยืนยันก่อนเปลี่ยนสถานะ (วินาที)", "ข้อจำกัด"]);
+      ["ช่วงสรุปที่เลือก (วินาที)", methodology.realtime_summary_interval_seconds],
+      ["พฤติกรรม", "สิ่งที่วัด", "เกณฑ์ตัดสิน", "ยืนยันก่อนเปลี่ยนสถานะ (วินาที)", "ขั้นต่ำในรายงาน (วินาทีที่ตรวจจริง)", "ข้อจำกัด"]);
     for (const item of methodology.criteria) {
       rows.push([item.label || behaviorLabel(item.behavior), item.measurement,
-        item.decision_rule, item.confirmation_seconds, item.limitation]);
+        item.decision_rule, item.confirmation_seconds,
+        item.report_minimum_seconds ?? (latestExportData.report_policy ? reportMinimumSeconds(item.behavior) : "ไม่คัดช่วง"), item.limitation]);
     }
     for (const limitation of methodology.limitations || []) rows.push(["ข้อจำกัดรวม", limitation]);
   }
@@ -1061,7 +1073,8 @@ function buildExportRows(data) {
   ];
   if (latestExportData?.report_policy) {
     rows.push(["เกณฑ์ขั้นต่ำ (วินาที)", latestExportData.report_policy.minimum_behavior_seconds]);
-    rows.push(["ระยะเวลา", "รวมเวลาตรวจจริงของทุกตำแหน่ง ไม่รวมช่วงที่ไม่ได้ตรวจ"]);
+    rows.push(["เกณฑ์หลับ (วินาทีที่ตรวจจริง)", reportMinimumSeconds("sleeping")]);
+    rows.push(["ระยะเวลา", "รวมเวลาตรวจจริงของทุก ID ไม่รวมช่วงที่ไม่ได้ตรวจ"]);
   }
   const periods = reportPeriodData();
   if (periods.length) {
@@ -1221,7 +1234,7 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
       header.textContent = `${header.dataset.behaviorLabel}${qualified ? " (นาที)" : ""}`;
     });
     set("reportPolicyCaption", qualified
-      ? "คิดเฉพาะช่วงที่มีเวลาตรวจจริงอย่างน้อย 30 วินาที | ไม่นับช่องว่างระหว่างช่วงตรวจ | ID เป็นตำแหน่ง ไม่ใช่ตัวบุคคล"
+      ? `เกณฑ์รายงาน: หลับ ${formatDecimal(reportMinimumSeconds("sleeping"))} วินาทีที่ตรวจจริง พฤติกรรมอื่น ${formatDecimal(latestExportData.report_policy?.minimum_behavior_seconds ?? 30)} วินาที | ไม่นับช่องว่างระหว่างช่วงตรวจ | ID อิงตำแหน่งภายในรอบ ไม่ยืนยันตัวบุคคล`
       : "รายงานเดิม: ใช้เกณฑ์ของรอบที่บันทึกไว้");
     set(
       "reportLatestAttention",
@@ -1346,7 +1359,7 @@ function initCharts() {
     behaviorPieChart = new Chart(pieCtx, {
       type: "doughnut",
       data: {
-        labels: ["ตั้งใจเรียน", "หลับ", "ก้มหน้า", "ใช้โทรศัพท์", "สงสัยใช้โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"],
+        labels: ["ตั้งใจเรียน", "ท่าเข้าข่ายหลับ", "ก้มหน้า", "ใช้โทรศัพท์", "สงสัยใช้โทรศัพท์", "ยกมือ", "ยืน/ลุก", "ไม่ชัดเจน"],
         datasets: [
           {
             data: [0, 0, 0, 0, 0, 0, 0, 0],

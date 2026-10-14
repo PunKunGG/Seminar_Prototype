@@ -13,7 +13,7 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from session_database import SessionDatabase
-from report_qualification import REPORT_POLICY, qualify_tracking
+from report_qualification import REPORT_POLICY_V2 as REPORT_POLICY, REPORT_POLICY as CURRENT_REPORT_POLICY, qualify_tracking
 
 
 class SessionHistoryTests(unittest.TestCase):
@@ -110,6 +110,34 @@ class SessionHistoryTests(unittest.TestCase):
                                 course_name="AI", source_type="video", source_label="clip.mp4",
                                 reset_tracking=True, report_policy=REPORT_POLICY)
         self.assertEqual(database.qualified_attention_rates("teacher-a"), {"clip": None})
+
+    def test_new_policy_history_matches_report_with_behavior_specific_thresholds(self):
+        database = SessionDatabase(self.path)
+        expected = {}
+        for seconds in (119.9, 120, 120.1):
+            session_id = f"sleep-{seconds}"
+            self.make_session(database, session_id, "teacher-a", report_policy=CURRENT_REPORT_POLICY)
+            self.store_events(database, session_id, [("attentive", 60, None), ("sleeping", seconds, None)])
+            expected[session_id] = qualify_tracking(database.tracking_report(session_id), CURRENT_REPORT_POLICY)["summary"]["attention_rate"]
+        self.assertEqual(database.qualified_attention_rates("teacher-a"), expected)
+        self.assertEqual(expected["sleep-119.9"], 100)
+        self.assertEqual(expected["sleep-120"], 33.3)
+
+    def test_video_binding_migration_is_additive_and_private(self):
+        database = SessionDatabase(self.path)
+        self.make_session(database, "old", "teacher-a", report_policy=REPORT_POLICY)
+        with database._connection() as connection:
+            connection.execute("ALTER TABLE class_sessions DROP COLUMN video_source_json")
+        database = SessionDatabase(self.path)
+        self.assertIsNone(database.video_source_binding("old"))
+        self.assertEqual(database.get_session("old")["report_policy"], REPORT_POLICY)
+        binding = {"path": "private-source.mp4", "identity": {"size": 10}}
+        database.upsert_session("new", name="new", owner_id="teacher-a", room_name="Lab", course_name="AI",
+                                source_type="video", source_label="clip.mp4", video_source_binding=binding)
+        restarted = SessionDatabase(self.path)
+        self.assertEqual(restarted.video_source_binding("new"), binding)
+        self.assertNotIn("video_source_json", restarted.get_session("new"))
+        self.assertNotIn("private-source.mp4", str(restarted.archive_rows("new")))
 
     def test_history_queries_stay_batched_as_the_number_of_sessions_grows(self):
         database = SessionDatabase(self.path)

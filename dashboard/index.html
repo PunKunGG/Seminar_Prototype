@@ -435,7 +435,7 @@
                       <th class="px-3 py-2 text-left font-semibold">พฤติกรรมล่าสุด</th>
                       <th class="px-3 py-2 text-right font-semibold">เวลาที่ตรวจพบ</th>
                       <th class="px-3 py-2 text-right font-semibold">ตั้งใจ (%)</th>
-                      <th class="px-3 py-2 text-right font-semibold">หลับ (ครั้ง)</th>
+                      <th class="px-3 py-2 text-right font-semibold">ท่าเข้าข่ายหลับ (ครั้ง)</th>
                       <th class="px-3 py-2 text-right font-semibold">ก้มหน้า (ครั้ง)</th>
                       <th class="px-3 py-2 text-right font-semibold">โทรศัพท์ (ครั้ง)</th>
                       <th class="px-3 py-2 text-right font-semibold">สงสัยโทรศัพท์ (ครั้ง)</th>
@@ -466,7 +466,7 @@
                   >
                 </div>
                 <div class="flex items-center justify-between text-sm">
-                  <span class="text-gray-600">หลับ</span>
+                  <span class="text-gray-600">ท่าเข้าข่ายหลับ</span>
                   <span
                     id="behaviorSleeping"
                     class="bg-red-100 text-red-800 px-2 py-1 rounded"
@@ -740,9 +740,10 @@
             </div>
 
             <div id="reportTrackingSection" class="hidden">
+              <p class="text-xs text-gray-500 mb-2">ID อิงตำแหน่งภายในรอบ ไม่ยืนยันบุคคลเดิมเมื่อสลับที่นั่ง</p>
               <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
                 <h4 class="font-semibold text-gray-800">
-                  สรุปตามตำแหน่ง
+                  สรุปตามบุคคล (ID)
                 </h4>
                 <span id="reportTrackingCaption" class="text-xs text-gray-500">
                   จำนวนครั้ง / ระยะเวลาที่วิเคราะห์ได้ตลอดคาบ
@@ -752,10 +753,10 @@
                 id="reportTrackingTableWrapper"
                 class="overflow-x-auto border border-gray-200 rounded-lg"
               >
-                <table class="w-full min-w-[1200px] text-xs text-left">
-                  <thead class="bg-gray-100 text-gray-700">
+                <table class="w-full text-xs text-left">
+                  <thead id="reportTrackingHead" class="bg-gray-100 text-gray-700">
                     <tr>
-                      <th class="px-3 py-2 font-semibold text-center">ภาพ / ตำแหน่ง</th>
+                      <th class="px-3 py-2 font-semibold text-center">ภาพ / ID</th>
                       <th class="px-3 py-2 font-semibold text-right">เวลาวิเคราะห์รวม</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ (%)</th>
                       <th class="px-3 py-2 font-semibold text-right">ตั้งใจ</th>
@@ -779,7 +780,7 @@
             <div id="reportBehaviorEventsSection" class="hidden">
               <div class="flex flex-col gap-1 mb-3 sm:flex-row sm:items-end sm:justify-between">
                 <h4 class="font-semibold text-gray-800">
-                  ช่วงพฤติกรรมตามตำแหน่ง
+                  ช่วงพฤติกรรมรายบุคคล
                 </h4>
                 <span id="reportBehaviorEventsCaption" class="text-xs text-gray-500">
                   0 ช่วง
@@ -792,12 +793,13 @@
                 <table class="w-full min-w-[760px] text-xs text-left">
                   <thead class="bg-gray-100 text-gray-700">
                     <tr>
-                      <th class="px-3 py-2 font-semibold">รหัสตำแหน่ง</th>
+                      <th class="px-3 py-2 font-semibold">ID ภายในรอบ</th>
                       <th class="px-3 py-2 font-semibold">เริ่ม</th>
                       <th class="px-3 py-2 font-semibold">สิ้นสุด</th>
                       <th class="px-3 py-2 font-semibold">พฤติกรรม</th>
                       <th class="px-3 py-2 font-semibold text-right">ระยะเวลา</th>
                       <th class="px-3 py-2 font-semibold text-right">ความมั่นใจ</th>
+                      <th class="px-3 py-2 font-semibold">หลักฐานวิดีโอ</th>
                     </tr>
                   </thead>
                   <tbody
@@ -812,8 +814,11 @@
             <details id="reportMethodologySection" class="border-t border-gray-200 pt-4">
               <summary class="cursor-pointer py-2 font-semibold text-gray-800 focus-visible:outline-blue-600">เกณฑ์การวัดพฤติกรรมและข้อจำกัด</summary>
               <div class="mt-3 space-y-3">
-                <p id="reportMethodologyCaption" class="text-xs text-gray-500">อ้างอิงจากค่าที่ระบบใช้ในรอบนี้</p>
-                <p id="reportAttentionFormula" class="text-sm text-gray-600">สูตรอัตราความตั้งใจ: -</p>
+                <div class="space-y-3" data-pdf-keep-together>
+                  <p id="reportMethodologyCaption" class="text-xs text-gray-500">อ้างอิงจากค่าที่ระบบใช้ในรอบนี้</p>
+                  <p id="reportAttentionFormula" class="text-sm text-gray-600">สูตรอัตราความตั้งใจ: -</p>
+                  <p id="reportSummaryInterval" class="text-sm text-gray-600"></p>
+                </div>
                 <div id="reportMethodologyTableWrapper" class="overflow-x-auto border border-gray-200 rounded-lg">
                   <table class="w-full min-w-[980px] text-xs text-left">
                     <thead class="bg-gray-100 text-gray-700">
@@ -821,6 +826,7 @@
                         <th class="px-3 py-2 font-semibold">พฤติกรรม</th>
                         <th class="px-3 py-2 font-semibold">สิ่งที่วัดและเกณฑ์ตัดสิน</th>
                         <th class="px-3 py-2 font-semibold text-right">ยืนยันก่อนเปลี่ยนสถานะ</th>
+                        <th class="px-3 py-2 font-semibold text-right">ขั้นต่ำในรายงาน</th>
                         <th class="px-3 py-2 font-semibold">ข้อจำกัดเฉพาะ</th>
                       </tr>
                     </thead>
@@ -837,6 +843,7 @@
     <script src="auth.js" defer></script>
     <script src="report-pdf.js" defer></script>
     <script src="shared.js" defer></script>
+    <script src="video-evidence.js" defer></script>
     <script src="session-history.js" defer></script>
     <!-- Toast notification container -->
     <div
@@ -849,6 +856,21 @@
         <button id="evidenceCloseButton" type="button" class="history-icon-button" aria-label="ปิดภาพหลักฐาน" title="ปิดภาพหลักฐาน">&times;</button>
       </div>
       <img id="evidenceFullImage" alt="" class="evidence-full-image" />
+    </dialog>
+    <dialog id="videoEvidenceDialog" class="session-dialog video-evidence-dialog" aria-labelledby="videoEvidenceTitle">
+      <div class="flex items-center justify-between gap-3 p-4 border-b border-gray-200">
+        <h3 id="videoEvidenceTitle" class="font-semibold text-sm min-w-0"></h3>
+        <button id="videoEvidenceClose" type="button" class="history-icon-button" aria-label="ปิดวิดีโอหลักฐาน" title="ปิดวิดีโอหลักฐาน">&times;</button>
+      </div>
+      <div class="video-evidence-body">
+        <video id="videoEvidencePlayer" controls playsinline preload="metadata" aria-label="คลิปต้นฉบับของช่วงพฤติกรรม"></video>
+        <div class="video-evidence-controls">
+          <div class="video-evidence-person"><img id="videoEvidencePortrait" width="80" height="80" alt="" /><span id="videoEvidencePerson"></span></div>
+          <div class="video-evidence-selection"><label for="videoEvidenceSegment" class="block text-sm font-medium mb-1">ช่วงที่ตรวจจริงในคลิป</label><select id="videoEvidenceSegment" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"></select></div>
+          <button id="videoEvidenceReplay" type="button" class="px-3 py-2 bg-blue-600 text-white rounded-md text-sm" disabled>เล่นช่วงนี้อีกครั้ง</button>
+        </div>
+        <p id="videoEvidenceStatus" class="text-sm text-gray-600" role="status" aria-live="polite"></p>
+      </div>
     </dialog>
   </body>
 </html>

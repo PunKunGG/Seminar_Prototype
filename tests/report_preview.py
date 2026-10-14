@@ -21,12 +21,14 @@ def main():
                                     supabase_server_key="", data_dir=directory,
                                     stats_file=os.path.join(directory, "stats.json"),
                                     session_database_file=os.path.join(directory, "sessions.db"),
-                                    evidence_dir=os.path.join(directory, "evidence"))
+                                    evidence_dir=os.path.join(directory, "evidence"),
+                                    video_source_dirs=(directory,))
         import cv2
         import server
         from behavior_analyzer import analyze_frame
         from person_tracking import BEHAVIOR_KEYS
         from report_qualification import REPORT_POLICY
+        from video_evidence import bind_video_source
 
         frame = cv2.imread(arguments.image)
         if frame is None:
@@ -35,16 +37,26 @@ def main():
         if not analysis["behaviors"]:
             raise ValueError("No pose detected in fixture image")
         geometry = analysis["behaviors"][0]
-        for session_id, policy in (("preview-new", REPORT_POLICY), ("preview-legacy", None)):
+        # Synthetic footage validates player mechanics only, not real behavior accuracy.
+        video_path = os.path.join(directory, "software-fixture.webm")
+        video_frame = cv2.resize(frame, (640, 360))
+        writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"VP80"), 2, (640, 360))
+        if not writer.isOpened():
+            raise ValueError("Cannot create WebM software fixture")
+        for _ in range(1200):
+            writer.write(video_frame)
+        writer.release()
+        for session_id, policy in (("preview-new", REPORT_POLICY), ("preview-legacy", None), ("preview-empty", REPORT_POLICY)):
             server.session_database.upsert_session(
                 session_id, name="Report preview " + session_id, room_name="Lab 9226", course_name="AI",
                 source_type="video", source_label="fixture.mp4",
                 recording_started_at="2026-10-09T09:00:00+07:00", report_policy=policy,
+                video_source_binding=bind_video_source(video_path) if policy else None,
             )
             tracks = []
             for track_id in range(1, 25):
-                behavior = BEHAVIOR_KEYS[(track_id - 1) % len(BEHAVIOR_KEYS)]
-                seconds = 1 if track_id == 24 else 60
+                behavior = "sleeping" if session_id == "preview-empty" else BEHAVIOR_KEYS[(track_id - 1) % len(BEHAVIOR_KEYS)]
+                seconds = 1 if track_id == 24 else (120 if track_id == 2 and session_id == "preview-new" else 60)
                 durations = {key: seconds if key == behavior else 0 for key in BEHAVIOR_KEYS}
                 counts = {key: 1 if key == behavior else 0 for key in BEHAVIOR_KEYS}
                 tracks.append({
@@ -57,6 +69,9 @@ def main():
                     "buckets": [{"bucket_start_seconds": 240, "visible_seconds": seconds,
                                  "behavior_seconds": durations, "event_counts": counts}],
                 })
+            if session_id == "preview-new":
+                tracks[0]["events"][0]["observed_segments"] = [[285, 315, 30], [330, 360, 30]]
+                tracks[0]["events"][0]["end_seconds"] = 360
             server.session_database.sync_tracking(session_id, tracks)
             detections = [{**geometry, "track_id": item["track_id"], "behavior": item["current_behavior"],
                            "is_new_track": True, "event_started": False} for item in tracks[:23]]

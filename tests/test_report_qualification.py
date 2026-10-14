@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from person_tracking import BEHAVIOR_KEYS, SessionTracker
 from pose_geometry import report_geometry
-from report_qualification import REPORT_POLICY, qualify_tracking
+from report_qualification import REPORT_POLICY_V2 as REPORT_POLICY, REPORT_POLICY as CURRENT_REPORT_POLICY, qualify_tracking
 from session_database import SessionDatabase
 
 
@@ -29,6 +29,22 @@ def position(x=0.2, y=0.3, behavior="attentive"):
 
 
 class QualificationTests(unittest.TestCase):
+    def test_new_sleep_threshold_preserves_old_round_results(self):
+        for behavior, boundary in (("sleeping", 120), ("attentive", 30), ("looking_down", 30)):
+            for seconds in (boundary - 0.1, boundary, boundary + 0.1):
+                with self.subTest(behavior=behavior, seconds=seconds):
+                    raw = {"tracks": [{"track_id": 1, "visible_seconds": seconds}], "events": [event(seconds, behavior)]}
+                    result = qualify_tracking(raw, CURRENT_REPORT_POLICY)
+                    self.assertEqual(len(result["events"]), int(seconds >= boundary))
+        self.assertEqual(len(qualify_tracking({"events": [event(30, "sleeping")]}, REPORT_POLICY)["events"]), 1)
+        self.assertEqual(len(qualify_tracking({"events": [event(30, "sleeping")]}, CURRENT_REPORT_POLICY)["events"]), 0)
+
+    def test_new_sleep_qualifies_before_period_split_without_including_gaps(self):
+        raw = {"events": [event(120, "sleeping", start=270, segments=[[270, 330, 60], [600, 660, 60]])]}
+        result = qualify_tracking(raw, CURRENT_REPORT_POLICY)
+        self.assertEqual([item["qualified_seconds"] for item in result["periods"]], [30, 30, 60])
+        self.assertEqual(sum(item["event_counts"]["sleeping"] for item in result["periods"]), 1)
+
     def test_threshold_uses_unrounded_duration(self):
         for seconds, expected in [(29.9, 0), (29.99, 0), (30, 1), (30.1, 1)]:
             with self.subTest(seconds=seconds):

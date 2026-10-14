@@ -13,7 +13,7 @@ function dashboardContext() {
     document: { addEventListener() {}, getElementById: (id) => elements[id] ?? null },
     window: { location: { protocol: "http:", origin: "http://localhost" }, addEventListener() {} },
   });
-  for (const filename of ["shared.js", "session-history.js"]) {
+  for (const filename of ["shared.js", "video-evidence.js", "session-history.js"]) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "dashboard", filename), "utf8"), context);
   }
   return { context, input, elements };
@@ -92,6 +92,53 @@ test("people and attention sort numerically with missing measurements last", () 
   assert.deepEqual(sortedIds(context, sessions, { sort: "people", direction: 1 }), ["zero", "two", "ten", "missing"]);
   assert.deepEqual(sortedIds(context, sessions, { sort: "people", direction: -1 }), ["ten", "two", "zero", "missing"]);
   assert.deepEqual(sortedIds(context, sessions, { sort: "attention", direction: 1 }), ["zero", "two", "ten", "missing"]);
+});
+
+test("ID summaries hide all-zero columns but keep portraits and individual dashes", () => {
+  const { context, elements } = dashboardContext();
+  elements.reportTrackingSection = { classList: { toggle() {} } };
+  elements.reportTrackingRows = { innerHTML: "" };
+  elements.reportTrackingCaption = {};
+  elements.reportTrackingHead = { innerHTML: "", closest: () => ({ style: {} }) };
+  context.tracking = { is_qualified: true, tracks: [
+    { track_id: 1, qualified_seconds: 30, visible_seconds: 35, attention_rate: 100, event_counts: { attentive: 1 }, behavior_seconds: { attentive: 30 } },
+    { track_id: 2, qualified_seconds: 0, visible_seconds: 20, attention_rate: null, event_counts: {} },
+  ] };
+  vm.runInContext("renderTrackingReport(tracking)", context);
+  assert.doesNotMatch(elements.reportTrackingHead.innerHTML, /หลับ|โทรศัพท์/);
+  assert.match(elements.reportTrackingHead.innerHTML, /ตั้งใจเรียน/);
+  assert.match(elements.reportTrackingRows.innerHTML, /ID 2/);
+  assert.match(elements.reportTrackingRows.innerHTML, />-<\/td>/);
+  context.tracking.tracks[0].event_counts = {};
+  vm.runInContext("renderTrackingReport(tracking)", context);
+  assert.match(elements.reportTrackingCaption.textContent, /ไม่มีช่วงพฤติกรรมผ่านเกณฑ์/);
+  assert.equal((elements.reportTrackingRows.innerHTML.match(/<td /g) || []).length, 6);
+});
+
+test("evidence segments preserve unsampled gaps and reject invalid offsets", () => {
+  const { context } = dashboardContext();
+  context.event = { observed_segments: [[600, 660, 60], [270, 330, 60], [-1, 1, 2], [3, 3, 1], [4, Infinity, 1]] };
+  assert.equal(vm.runInContext("JSON.stringify(evidenceSegments(event))", context), '[{"start":270,"end":330},{"start":600,"end":660}]');
+  assert.equal(vm.runInContext("evidenceSegments({}).length", context), 0);
+  assert.equal(vm.runInContext("evidenceTime(3661)", context), "1:01:01");
+});
+
+test("new report minimums do not rewrite legacy policy thresholds", () => {
+  const { context } = dashboardContext();
+  vm.runInContext("latestExportData = { report_policy: { version: 3, minimum_behavior_seconds: 30, minimum_behavior_seconds_by_behavior: { sleeping: 120 } } }", context);
+  assert.equal(vm.runInContext("reportMinimumSeconds('sleeping')", context), 120);
+  assert.equal(vm.runInContext("reportMinimumSeconds('attentive')", context), 30);
+  vm.runInContext("latestExportData.report_policy.version = 2", context);
+  assert.equal(vm.runInContext("reportMinimumSeconds('sleeping')", context), 30);
+});
+
+test("video actions explain unavailable sources instead of guessing a clip", () => {
+  const { context } = dashboardContext();
+  vm.runInContext("latestExportData = { video_evidence: { available: false, reason: 'changed' } }", context);
+  assert.match(vm.runInContext("videoEvidenceAction({}, 0)", context), /ไฟล์คลิปเปลี่ยน/);
+  assert.doesNotMatch(vm.runInContext("videoEvidenceAction({}, 0)", context), /<button/);
+  vm.runInContext("latestExportData.video_evidence = { available: true, url: '/api/sessions/round/video' }", context);
+  assert.match(vm.runInContext("videoEvidenceAction({ track_id: 1, observed_segments: [[1,2,1]] }, 0)", context), /data-video-event="0"/);
 });
 
 test("search includes names, subjects, rooms and Thai display dates", () => {

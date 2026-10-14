@@ -24,6 +24,7 @@ function showSessionHistory() {
 }
 
 function showAppView(view) {
+  if (typeof closeVideoEvidence === "function") closeVideoEvidence();
   const changed = appView !== view;
   if (view !== "report") {
     reportRequestVersion += 1;
@@ -226,6 +227,7 @@ document.addEventListener("classmood:ready", () => {
   applyAppRoute();
 });
 document.addEventListener("classmood:locked", () => {
+  if (typeof closeVideoEvidence === "function") closeVideoEvidence();
   appReady = false;
   historyRequestVersion += 1;
   reportRequestVersion += 1;

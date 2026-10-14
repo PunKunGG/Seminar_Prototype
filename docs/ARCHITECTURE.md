@@ -17,6 +17,8 @@ Qualification precedes five-minute allocation; attentive and hand-raised qualifi
 
 Persist the source reference and file identity in SQLite only when a new video round starts. Keep these fields out of public metadata, normalized Supabase records, and report JSON. Validate real paths against configured video roots unless `CLASSMOOD_ALLOW_ANY_VIDEO_PATH` explicitly permits unrestricted local paths. Always check the persisted source binding, file identity, and ownership each time footage is requested, regardless of that setting.
 
+Source admission resolves both the input path and configured roots before checking containment, then passes that canonical path to capture and binding. A symlink escaping an allowed root is rejected before analysis starts unless unrestricted paths are explicitly enabled. In-root aliases and symlinked roots use the same real-path validation as evidence playback.
+
 `GET /api/sessions/<session_id>/video` serves the owner's original file with HTTP Range support and private/no-store headers. Auth-disabled operation retains local access restrictions. It must never accept a client-provided filesystem path.
 
 Report responses include additive `video_evidence` availability information and a session-scoped URL when available. Recompute this information for local and archived reports at request time. Cloud-only reports remain readable but cannot obtain unbound local footage.

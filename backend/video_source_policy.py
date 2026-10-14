@@ -66,7 +66,7 @@ class VideoSourcePolicy:
         if "://" in raw_source:
             return None, "Network video URLs are disabled by default"
 
-        path = os.path.abspath(os.path.expanduser(raw_source))
+        path = os.path.realpath(os.path.abspath(os.path.expanduser(raw_source)))
         extension = os.path.splitext(path)[1].lower()
         if extension not in self.video_extensions:
             return None, self._extension_error()
@@ -74,7 +74,10 @@ class VideoSourcePolicy:
             return None, f"Video file not found: {path}"
         if (
             not allow_any_path
-            and not is_path_inside(path, self.source_directories)
+            and not is_path_inside(path, [
+                os.path.realpath(directory)
+                for directory in self.source_directories
+            ])
         ):
             allowed = ", ".join(self.source_directories)
             return (

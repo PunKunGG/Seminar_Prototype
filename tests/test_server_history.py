@@ -399,6 +399,36 @@ class SessionApiTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 400)
 
+    def test_escaped_source_link_is_rejected_before_capture_or_round_creation(self):
+        from video_source_policy import VideoSourcePolicy
+
+        allowed = os.path.join(self.directory.name, "allowed-videos")
+        os.makedirs(allowed, exist_ok=True)
+        target = os.path.join(self.directory.name, "escaped.mp4")
+        open(target, "wb").close()
+        alias = os.path.join(allowed, "link.mp4")
+        open(alias, "wb").close()
+        policy = VideoSourcePolicy(max_webcam_index=3, video_extensions={".mp4"},
+                                   source_directories=[allowed], upload_directory=allowed,
+                                   filename_sanitizer=lambda value: value)
+        realpath = os.path.realpath
+        with (
+            patch.object(self.server, "CONFIG", replace(self.server.CONFIG, allow_any_video_path=False)),
+            patch.object(self.server, "video_source_policy", policy),
+            patch("video_source_policy.os.path.realpath", side_effect=lambda path: realpath(target if path == alias else path)),
+            patch.object(sys.modules["cv2"], "VideoCapture", create=True) as capture,
+            patch.object(self.server.session_database, "upsert_session") as create_round,
+            patch.object(self.server, "_start_capture") as start,
+        ):
+            response = self.client.post("/api/sources/escaped-link/1", json={
+                "source": alias, "recording_start": "2026-10-14T10:00:00+07:00",
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("allowed directories", response.json["error"])
+        capture.assert_not_called()
+        create_round.assert_not_called()
+        start.assert_not_called()
+
     def test_video_requires_recording_clock_and_saves_selected_interval(self):
         class Capture:
             def isOpened(self):

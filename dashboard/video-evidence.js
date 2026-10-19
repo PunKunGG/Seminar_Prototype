@@ -23,10 +23,12 @@ function videoEvidenceAction(event, index) {
 }
 
 function evidenceTime(seconds) {
-  const total = Math.floor(seconds);
+  const milliseconds = Math.max(0, Math.round(seconds * 1000));
+  const total = Math.floor(milliseconds / 1000);
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor(total % 3600 / 60);
-  return `${hours ? `${hours}:` : ""}${String(minutes).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  const fraction = milliseconds % 1000 ? `.${String(milliseconds % 1000).padStart(3, "0").replace(/0+$/, "")}` : "";
+  return `${hours ? `${hours}:` : ""}${String(minutes).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}${fraction}`;
 }
 
 function playbackBounds(segment, duration) {
@@ -35,6 +37,24 @@ function playbackBounds(segment, duration) {
       || segment.start < 0 || segment.start >= duration) return null;
   const end = Math.min(segment.end, duration);
   return end > segment.start ? { start: segment.start, end } : null;
+}
+
+function evidencePlaybackWindow(segment, duration, mode = "observed") {
+  const observed = playbackBounds(segment, duration);
+  if (!observed) return null;
+  return mode === "context"
+    ? { start: Math.max(0, observed.start - 3), end: Math.min(duration, observed.end + 3) }
+    : observed;
+}
+
+function evidenceTimeTolerance(segment) {
+  return Math.min(0.05, (segment.end - segment.start) / 4);
+}
+
+function evidencePlaybackPhase(time, observed) {
+  if (time < observed.start - evidenceTimeTolerance(observed)) return "บริบทก่อนช่วงตรวจ";
+  if (time >= observed.end) return "บริบทหลังช่วงตรวจ";
+  return "อยู่ในช่วงที่ตรวจจริง";
 }
 
 function closeVideoEvidence() {
@@ -49,39 +69,73 @@ function setupVideoEvidenceViewer() {
   const select = document.getElementById("videoEvidenceSegment");
   const replay = document.getElementById("videoEvidenceReplay");
   const portrait = document.getElementById("videoEvidencePortrait");
-  const setStatus = message => setTextIfPresent("videoEvidenceStatus", message);
+  const setStatus = message => {
+    if (document.getElementById("videoEvidenceStatus").textContent !== message) setTextIfPresent("videoEvidenceStatus", message);
+  };
   const stopAnimation = () => {
     if (videoEvidenceAnimation != null) cancelAnimationFrame(videoEvidenceAnimation);
     videoEvidenceAnimation = null;
   };
-  const bounds = () => playbackBounds(videoEvidenceState?.segments[Number(select.value)], player.duration);
+  const selectedSegment = () => videoEvidenceState?.segments[Number(select.value)];
+  const observedBounds = () => playbackBounds(selectedSegment(), player.duration);
+  const bounds = () => evidencePlaybackWindow(selectedSegment(), player.duration, videoEvidenceState?.mode);
   const validBounds = () => Boolean(bounds());
   const enforceBounds = () => {
     const segment = bounds();
-    if (!segment || !dialog.open || !validBounds()) return;
-    if (player.currentTime >= segment.end) {
+    if (!segment || !dialog.open || player.error || player.seeking) return;
+    // Media clocks round fractional offsets; correcting every tiny difference can loop seeks.
+    const tolerance = evidenceTimeTolerance(segment);
+    if (player.currentTime >= segment.end
+      || (videoEvidenceState.reachedEnd && player.currentTime >= segment.end - tolerance)) {
+      videoEvidenceState.reachedEnd = true;
       player.pause();
-      if (player.currentTime !== segment.end) player.currentTime = segment.end;
-      setStatus("จบช่วงที่ตรวจจริงแล้ว");
-    } else if (player.currentTime < segment.start) {
-      player.currentTime = segment.start;
+      if (player.currentTime > segment.end + tolerance) player.currentTime = segment.end;
+      setStatus(videoEvidenceState.mode === "context" ? "จบช่วงเล่นพร้อมบริบทแล้ว" : "จบช่วงที่ตรวจจริงแล้ว");
+    } else {
+      videoEvidenceState.reachedEnd = false;
+      if (player.currentTime < segment.start - tolerance) player.currentTime = segment.start;
+      setStatus(evidencePlaybackPhase(player.currentTime, observedBounds()));
     }
   };
   const watchFrames = () => {
     enforceBounds();
     if (!player.paused && dialog.open) videoEvidenceAnimation = requestAnimationFrame(watchFrames);
   };
+  const updateRanges = () => {
+    const observed = selectedSegment();
+    const clamped = observedBounds().end < observed.end;
+    setTextIfPresent("videoEvidenceRanges", `ช่วงตรวจจริง ${evidenceTime(observed.start)} - ${evidenceTime(observed.end)} | ช่วงเล่น ${evidenceTime(bounds().start)} - ${evidenceTime(bounds().end)} ในคลิปต้นฉบับ${clamped ? " (จำกัดจุดจบตามความยาวคลิป)" : ""}`);
+  };
   const chooseSegment = () => {
+    if (!videoEvidenceState || !dialog.open) return;
     player.pause();
-    if (!validBounds()) {
-      replay.disabled = true;
+    videoEvidenceState.positioned = false;
+    videoEvidenceState.reachedEnd = false;
+    document.getElementById("videoEvidenceContextNote").classList.toggle("hidden", videoEvidenceState.mode !== "context");
+    replay.disabled = !validBounds();
+    if (replay.disabled) {
+      setTextIfPresent("videoEvidenceRanges", "");
       setStatus(player.readyState ? "ช่วงเวลาหลักฐานไม่ตรงกับความยาวคลิป" : "กำลังโหลดคลิป...");
       return;
     }
+    videoEvidenceState.positioned = true;
     player.currentTime = bounds().start;
-    replay.disabled = false;
-    const clamped = bounds().end < videoEvidenceState.segments[Number(select.value)].end;
-    setStatus(`ตรวจจริง ${evidenceTime(bounds().start)} - ${evidenceTime(bounds().end)} ในคลิปต้นฉบับ${clamped ? " (จำกัดจุดจบตามความยาวคลิป)" : ""}`);
+    updateRanges();
+    const observed = observedBounds();
+    setStatus(evidencePlaybackPhase(bounds().start, observed));
+  };
+  const syncMediaBounds = () => {
+    if (!videoEvidenceState || !dialog.open) return;
+    if (!videoEvidenceState.positioned) { chooseSegment(); return; }
+    replay.disabled = !validBounds();
+    if (replay.disabled) {
+      player.pause();
+      setTextIfPresent("videoEvidenceRanges", "");
+      setStatus("ช่วงเวลาหลักฐานไม่ตรงกับความยาวคลิป");
+      return;
+    }
+    updateRanges();
+    enforceBounds();
   };
   document.getElementById("videoEvidenceClose").addEventListener("click", closeVideoEvidence);
   dialog.addEventListener("close", () => {
@@ -92,22 +146,36 @@ function setupVideoEvidenceViewer() {
     player.removeAttribute("src");
     player.load();
     portrait.removeAttribute("src");
+    delete portrait.dataset.originalUrl;
     replay.disabled = true;
     if (opener?.isConnected) opener.focus();
   });
   select.addEventListener("change", chooseSegment);
-  player.addEventListener("loadedmetadata", chooseSegment);
+  for (const radio of document.querySelectorAll('input[name="videoEvidenceMode"]')) {
+    radio.addEventListener("change", () => {
+      if (!radio.checked || !videoEvidenceState) return;
+      videoEvidenceState.mode = radio.value;
+      chooseSegment();
+    });
+  }
+  player.addEventListener("loadedmetadata", syncMediaBounds);
+  player.addEventListener("durationchange", syncMediaBounds);
   player.addEventListener("seeking", enforceBounds);
+  player.addEventListener("seeked", enforceBounds);
   player.addEventListener("timeupdate", enforceBounds);
   player.addEventListener("play", () => {
     if (!validBounds()) { player.pause(); return; }
-    if (player.currentTime >= bounds().end) player.currentTime = bounds().start;
+    if (videoEvidenceState.reachedEnd || player.currentTime >= bounds().end) {
+      videoEvidenceState.reachedEnd = false;
+      player.currentTime = bounds().start;
+    }
     stopAnimation();
     watchFrames();
   });
   player.addEventListener("pause", stopAnimation);
   replay.addEventListener("click", () => {
     if (!validBounds()) return;
+    videoEvidenceState.reachedEnd = false;
     player.currentTime = bounds().start;
     player.play().catch(() => setStatus("กดเล่นในตัวเล่นวิดีโออีกครั้ง"));
   });
@@ -124,7 +192,14 @@ function setupVideoEvidenceViewer() {
       } else await response.body?.cancel();
     } catch { /* The report remains readable when its source is unavailable. */ }
   });
-  portrait.addEventListener("error", () => { portrait.hidden = true; });
+  portrait.addEventListener("load", () => {
+    if (portrait.dataset.originalUrl) useOriginalForPaddedPortrait(portrait, portrait.dataset.originalUrl);
+  });
+  portrait.addEventListener("error", () => {
+    if (portrait.dataset.originalUrl && portrait.src !== portrait.dataset.originalUrl) {
+      portrait.src = portrait.dataset.originalUrl;
+    } else portrait.hidden = true;
+  });
   document.getElementById("reportBehaviorEventRows").addEventListener("click", event => {
     const opener = event.target.closest("button[data-video-event]");
     if (!opener) return;
@@ -133,12 +208,18 @@ function setupVideoEvidenceViewer() {
     const segments = evidenceSegments(behaviorEvent);
     const url = latestExportData?.video_evidence?.url;
     if (!segments.length || !latestExportData.video_evidence.available || !/^\/api\/sessions\/[^/]+\/video$/.test(url)) return;
-    videoEvidenceState = { segments, opener, url };
+    videoEvidenceState = { segments, opener, url, mode: "observed" };
+    for (const radio of document.querySelectorAll('input[name="videoEvidenceMode"]')) radio.checked = radio.value === "observed";
+    document.getElementById("videoEvidenceContextNote").classList.add("hidden");
+    setTextIfPresent("videoEvidenceRanges", "");
     select.innerHTML = segments.map((segment, index) => `<option value="${index}">${index + 1}. ${evidenceTime(segment.start)} - ${evidenceTime(segment.end)}</option>`).join("");
     select.value = "0";
     const image = representativeImages(tracking).get(Number(behaviorEvent.track_id));
     portrait.hidden = !image?.url;
-    if (image?.url) portrait.src = apiUrl(image.thumbnail_url || image.url);
+    if (image?.url) {
+      portrait.dataset.originalUrl = apiUrl(image.url);
+      portrait.src = apiUrl(image.thumbnail_url || image.url);
+    }
     portrait.alt = `ภาพอ้างอิง ID ${behaviorEvent.track_id}`;
     setTextIfPresent("videoEvidencePerson", `ID ${behaviorEvent.track_id}`);
     setTextIfPresent("videoEvidenceTitle", `ID ${behaviorEvent.track_id} | ${behaviorLabel(behaviorEvent.behavior)}`);

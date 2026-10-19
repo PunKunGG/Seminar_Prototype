@@ -10,6 +10,9 @@ let useBehaviorMode = true; // ✅ เปิดโหมดวิเคราะ
 let liveFeedInterval = null;
 let lastAlertId = 0; // ID สุดท้ายที่ได้รับเพื่อหลีกเอา alert ซ้ำ
 let alertPollInterval = null; // setInterval handle สำหรับดึง alerts
+let alertCursorReady = false;
+let alertPollGeneration = 0;
+let alertPollRequest = null;
 let latestExportData = null; // เก็บข้อมูลล่าสุดสำหรับ export
 let sourceStatusInterval = null;
 let currentSourceType = null;
@@ -307,6 +310,41 @@ function renderAnalysisMethodology(methodology = null) {
 
 
 
+function hasExcessivePortraitPadding(pixels, width, height) {
+  let left = width, top = height, right = -1, bottom = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const offset = (y * width + x) * 4;
+      if (Math.abs(pixels[offset] - 245) <= 6
+          && Math.abs(pixels[offset + 1] - 245) <= 6
+          && Math.abs(pixels[offset + 2] - 245) <= 6) continue;
+      left = Math.min(left, x); right = Math.max(right, x);
+      top = Math.min(top, y); bottom = Math.max(bottom, y);
+    }
+  }
+  // Only reject the old generated padding, never crop or infer a face from pixels.
+  return left > 0 && top > 0 && right < width - 1 && bottom < height - 1
+    && (right - left + 1) * (bottom - top + 1) < width * height * 0.25;
+}
+
+function useOriginalForPaddedPortrait(image, originalUrl) {
+  if (image.src === originalUrl || !image.naturalWidth || image.naturalWidth !== image.naturalHeight) return false;
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 80;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return false;
+    context.drawImage(image, 0, 0, 80, 80);
+    if (hasExcessivePortraitPadding(context.getImageData(0, 0, 80, 80).data, 80, 80)) {
+      image.src = originalUrl;
+      return true;
+    }
+  } catch {
+    // A cross-origin image without canvas access remains viewable as saved.
+  }
+  return false;
+}
+
 function setupEvidenceViewer() {
   const dialog = document.getElementById("evidenceDialog");
   if (!dialog) return;
@@ -327,6 +365,11 @@ function setupEvidenceViewer() {
     setTextIfPresent("evidenceDialogTitle", button.dataset.evidenceTitle);
     dialog.showModal();
   });
+  document.getElementById("reportTrackingRows").addEventListener("load", (event) => {
+    if (event.target.tagName !== "IMG") return;
+    const button = event.target.closest("button[data-evidence-url]");
+    if (button) useOriginalForPaddedPortrait(event.target, button.dataset.evidenceUrl);
+  }, true);
   document.getElementById("reportTrackingRows").addEventListener("error", (event) => {
     if (event.target.tagName !== "IMG") return;
     const button = event.target.closest("button");
@@ -339,6 +382,52 @@ function setupEvidenceViewer() {
   }, true);
 }
 
+const BEHAVIOR_EVENT_PAGE_SIZE = 25;
+let behaviorEventView = { includeExcluded: false, trackId: "", behavior: "", page: 1 };
+
+function resetBehaviorEventView() {
+  behaviorEventView = { includeExcluded: false, trackId: "", behavior: "", page: 1 };
+}
+
+function behaviorEventKey(event) {
+  return `${Number(event.track_id)}:${Number(event.event_index)}`;
+}
+
+function behaviorEventPage(tracking = {}, qualified = null, view = behaviorEventView) {
+  const accepted = new Set((qualified?.events || []).map(behaviorEventKey));
+  const filtered = (tracking?.events || []).map((event, rawIndex) => ({
+    event, rawIndex, accepted: !qualified || accepted.has(behaviorEventKey(event)),
+  })).filter(item => (!qualified || view.includeExcluded || item.accepted)
+    && (!view.trackId || String(item.event.track_id) === view.trackId)
+    && (!view.behavior || item.event.behavior === view.behavior));
+  const pages = Math.max(1, Math.ceil(filtered.length / BEHAVIOR_EVENT_PAGE_SIZE));
+  const page = Math.max(1, Math.min(pages, Math.floor(Number(view.page) || 1)));
+  return { items: filtered.slice((page - 1) * BEHAVIOR_EVENT_PAGE_SIZE, page * BEHAVIOR_EVENT_PAGE_SIZE),
+    total: filtered.length, page, pages };
+}
+
+function formatEventDuration(event) {
+  const seconds = Number(event.observed_duration_seconds ?? event.duration_seconds);
+  return seconds > 0 && seconds < 1 ? "น้อยกว่า 1 วินาที" : formatDuration(seconds);
+}
+
+function setupBehaviorEventControls() {
+  for (const [id, key] of [["reportEventsIncludeExcluded", "includeExcluded"],
+    ["reportEventsTrack", "trackId"], ["reportEventsBehavior", "behavior"]]) {
+    document.getElementById(id)?.addEventListener("change", event => {
+      behaviorEventView[key] = key === "includeExcluded" ? event.target.checked : event.target.value;
+      behaviorEventView.page = 1;
+      renderBehaviorEvents(reportEvidenceData());
+    });
+  }
+  for (const [id, step] of [["reportEventsPrevious", -1], ["reportEventsNext", 1]]) {
+    document.getElementById(id)?.addEventListener("click", () => {
+      behaviorEventView.page += step;
+      renderBehaviorEvents(reportEvidenceData());
+    });
+  }
+}
+
 function renderBehaviorEvents(tracking = null) {
   const section = document.getElementById("reportBehaviorEventsSection");
   const body = document.getElementById("reportBehaviorEventRows");
@@ -347,29 +436,46 @@ function renderBehaviorEvents(tracking = null) {
 
   const events = tracking?.events || [];
   const qualified = latestExportData?.qualified_analysis;
-  const eventKey = event => `${Number(event.track_id)}:${Number(event.event_index)}`;
-  const accepted = new Set((qualified?.events || []).map(eventKey));
-  const displayLimit = 300;
-  const visibleEvents = events.slice(0, displayLimit);
-  section.classList.toggle("hidden", visibleEvents.length === 0);
-  const countCaption = events.length > displayLimit
-    ? `แสดง ${displayLimit} จาก ${events.length} ช่วง`
-    : `${events.length} ช่วง`;
-  caption.textContent = `${countCaption} | ผลตรวจดิบ${qualified ? " รวมช่วงที่ไม่คิดในรายงาน" : ""}`;
-  body.innerHTML = visibleEvents
-    .map((event, index) => `
+  const result = behaviorEventPage(tracking, qualified);
+  behaviorEventView.page = result.page;
+  section.classList.toggle("hidden", !tracking);
+  const include = document.getElementById("reportEventsIncludeExcluded");
+  if (include) { include.checked = behaviorEventView.includeExcluded; include.disabled = !qualified; }
+  const trackSelect = document.getElementById("reportEventsTrack");
+  if (trackSelect) {
+    const ids = [...new Set(events.map(event => Number(event.track_id)))].sort((a, b) => a - b);
+    trackSelect.innerHTML = '<option value="">ทุก ID</option>' + ids.map(id => `<option value="${id}">ID ${id}</option>`).join("");
+    trackSelect.value = behaviorEventView.trackId;
+  }
+  const behaviorSelect = document.getElementById("reportEventsBehavior");
+  if (behaviorSelect) {
+    const keys = [...new Set(events.map(event => event.behavior))];
+    behaviorSelect.innerHTML = '<option value="">ทุกพฤติกรรม</option>' + keys.map(key => `<option value="${escapeHtml(key)}">${escapeHtml(behaviorLabel(key))}</option>`).join("");
+    behaviorSelect.value = behaviorEventView.behavior;
+  }
+  const first = result.total ? (result.page - 1) * BEHAVIOR_EVENT_PAGE_SIZE + 1 : 0;
+  caption.textContent = `แสดง ${first}–${first ? first + result.items.length - 1 : 0} จาก ${result.total} ช่วง | ${qualified ? (behaviorEventView.includeExcluded ? "ผลตรวจดิบ รวมช่วงที่ไม่คิดในรายงาน" : "เฉพาะช่วงที่นับในรายงาน") : "ผลตามเกณฑ์เดิม"}`;
+  setTextIfPresent("reportEventsPage", `หน้า ${result.page} / ${result.pages}`);
+  const previous = document.getElementById("reportEventsPrevious");
+  const next = document.getElementById("reportEventsNext");
+  if (previous) previous.disabled = result.page <= 1;
+  if (next) next.disabled = result.page >= result.pages;
+  body.innerHTML = result.items
+    .map(({ event, rawIndex, accepted }, index) => `
       <tr class="${index % 2 === 0 ? "bg-white" : "bg-gray-50"}">
         <td class="px-3 py-2 font-semibold text-blue-700 whitespace-nowrap">ID ${toWholePeople(event.track_id)}</td>
         <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(event.start_time || "-")}</td>
         <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(event.end_time || "-")}</td>
         <td class="px-3 py-2 whitespace-nowrap">${escapeHtml(behaviorLabel(event.behavior))}</td>
-        <td class="px-3 py-2 text-right whitespace-nowrap">${formatDuration(event.duration_seconds)}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">${formatEventDuration(event)}</td>
         <td class="px-3 py-2 text-right whitespace-nowrap">${formatDecimal(event.avg_confidence)}%</td>
-        <td class="px-3 py-2 text-xs ${qualified && !accepted.has(eventKey(event)) ? "text-gray-500" : "text-green-700"}">${qualified ? (accepted.has(eventKey(event)) ? "นับในรายงาน" : `ไม่คิดในรายงาน (ขั้นต่ำ ${formatDecimal(reportMinimumSeconds(event.behavior))} วินาทีที่ตรวจจริง)`) : "ผลตามเกณฑ์เดิม"}</td>
-        <td class="px-3 py-2 evidence-action">${videoEvidenceAction(event, index)}</td>
+        <td class="px-3 py-2 text-xs ${!accepted ? "text-gray-500" : "text-green-700"}">${qualified ? (accepted ? "นับในรายงาน" : `ไม่คิดในรายงาน (ขั้นต่ำ ${formatDecimal(reportMinimumSeconds(event.behavior))} วินาทีที่ตรวจจริง)`) : "ผลตามเกณฑ์เดิม"}</td>
+        <td class="px-3 py-2 evidence-action">${videoEvidenceAction(event, rawIndex)}</td>
       </tr>
     `)
-    .join("");
+    .join("") || `<tr><td colspan="8" class="px-3 py-6 text-center text-gray-500">${qualified && !behaviorEventView.includeExcluded
+      ? "ไม่มีช่วงพฤติกรรมผ่านเกณฑ์ตามตัวกรองนี้ เปิดรวมช่วงที่ไม่ผ่านเกณฑ์เพื่อดูผลตรวจดิบ"
+      : "ไม่มีช่วงพฤติกรรมตามตัวกรองนี้"}</td></tr>`;
 }
 
 function renderReportTimeline(periods = [], periodSeconds = 300) {
@@ -506,9 +612,11 @@ function startLiveFeed() {
 
 // 🔄 ฟังก์ชันอัปเดต feed และข้อมูล
 async function updateLiveFeed() {
+  const sessionId = currentLab;
+  const version = analysisViewVersion;
   const feed = document.getElementById("liveFeed");
   const detectionCount = document.getElementById("detectionCount");
-  if (!feed || !currentLab) return;
+  if (!feed || !analysisViewIsCurrent(sessionId, version)) return;
 
   if (!isStreamActive(currentLab, currentCamera)) {
     showFeedPlaceholder();
@@ -519,6 +627,7 @@ async function updateLiveFeed() {
     // ดึงข้อมูลการตรวจจับ
     const dataRes = await apiFetch(`/api/data/${currentLab}/${currentCamera}`);
     const data = await dataRes.json();
+    if (!analysisViewIsCurrent(sessionId, version)) return;
 
     if (!data || data.error) {
       detectionCount.textContent = "ไม่พบข้อมูลตรวจจับ";
@@ -545,6 +654,7 @@ async function updateLiveFeed() {
     if (useBehaviorMode) {
       const behaviorRes = await apiFetch(`/api/behavior/${currentLab}/${currentCamera}`);
       const behaviorData = await behaviorRes.json();
+      if (!analysisViewIsCurrent(sessionId, version)) return;
 
       if (behaviorData && !behaviorData.error) {
         updateBehaviorStats(behaviorData);
@@ -554,6 +664,7 @@ async function updateLiveFeed() {
       detectionCount.textContent = `ตรวจพบ ${data.num_people} คน | เชื่อมั่น ${data.avg_confidence}%`;
     }
   } catch (e) {
+    if (!analysisViewIsCurrent(sessionId, version)) return;
     console.error("Error fetching data:", e);
     detectionCount.textContent = "ข้อมูลไม่พร้อม";
   }
@@ -730,6 +841,14 @@ function recordingStartWithOffset(value) {
     + `${sign}${pad(Math.floor(magnitude / 60))}:${pad(magnitude % 60)}`;
 }
 
+function recordingStartLocalValue(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "";
+  const pad = number => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function normalizeAnalysisIntervalInput() {
   const input = document.getElementById("analysisIntervalInput");
   if (!input) return 30;
@@ -743,10 +862,16 @@ function normalizeAnalysisIntervalInput() {
 }
 
 function setSourceMode(mode) {
-  if (activeSources.has(_srcKey(currentLab, currentCamera))) {
+  const nextMode = mode === "webcam" ? "webcam" : "video";
+  const pending = sourceOperation?.sessionId === currentLab && sourceOperation.camId === currentCamera;
+  if (nextMode !== selectedSourceMode && (activeSources.has(_srcKey(currentLab, currentCamera)) || pending)) {
     showToast("หยุดรอบปัจจุบันก่อนเปลี่ยนแหล่งภาพ", "warning");
     return;
   }
+  renderSourceMode(nextMode);
+}
+
+function renderSourceMode(mode) {
   selectedSourceMode = mode === "webcam" ? "webcam" : "video";
   document.getElementById("webcamSourcePanel")?.classList.toggle(
     "hidden", selectedSourceMode !== "webcam",
@@ -771,6 +896,7 @@ function setSourceMode(mode) {
 function resetDashboardState() {
   stopSourceStatusPolling();
   latestExportData = null;
+  resetBehaviorEventView();
   currentSourceType = null;
   autoReportShown = false;
   sessionCompleted = false;
@@ -814,11 +940,14 @@ function resetDashboardState() {
 
   const input = document.getElementById("videoFileInput");
   if (input) input.value = "";
+  resetRecordingStartInput();
+  renderCurrentSourceControls();
   renderLiveTracks([]);
 }
 
 // 🎥 เริ่มรอบวิเคราะห์
 function startSession() {
+  if (analysisJobBlocksCreation()) { showToast("มีงานกำลังทำอยู่ หรือยังตรวจสถานะงานไม่สำเร็จ", "warning"); return; }
   const input = document.getElementById("sessionNameInput");
   const name = input?.value.trim() || getDefaultSessionName();
   currentRoomName =
@@ -830,6 +959,10 @@ function startSession() {
     showToast("ช่วงสรุปผลต้องอยู่ระหว่าง 15-300 วินาที", "warning");
     return;
   }
+  for (const [key, job] of analysisJobs) {
+    if (job.reportViewed && !analysisJobNeedsStop(job) && !job.stopping) analysisJobs.delete(key);
+  }
+  renderAnalysisJobs();
   currentAnalysisInterval = interval;
   currentRecordingStart = "";
   closeNewSessionForm();
@@ -859,41 +992,7 @@ function openAnalysisSession(sessionId, sessionName) {
 
 // 🔙 กลับไปหน้าเริ่มต้น
 async function backToMenu(updateRoute = true) {
-  const sessionId = currentLab;
-  const cameraId = currentCamera;
-  if (sessionId && isStreamActive(sessionId, cameraId)) {
-    try {
-      const response = await apiFetch(`/api/sources/${sessionId}/${cameraId}`, {
-        method: "DELETE",
-      });
-      if (!response.ok) throw new Error("ไม่สามารถหยุดรอบวิเคราะห์ได้");
-    } catch (error) {
-      showToast(error.message, "alert");
-      navigateApp("#analysis", { replace: true });
-      return;
-    }
-  }
-  currentLab = "";
-  currentSessionName = "";
-  currentRoomName = "";
-  currentCourseName = "";
-  currentRecordingStart = "";
-
-  // หยุด intervals
-  if (liveFeedInterval) {
-    clearInterval(liveFeedInterval);
-    liveFeedInterval = null;
-  }
-  stopChartUpdates();
-  stopAlertPolling(); // 🔔 หยุดยิงฟังแจ้งเตือน
-  resetDashboardState();
-  resetRecordingStartInput();
-  if (updateRoute) navigateApp("#history");
-  else {
-    window.history.replaceState(null, "", "#history");
-    showSessionHistory();
-  }
-  loadSessionHistory();
+  return navigateApp("#history", { replace: !updateRoute });
 }
 
 // 🌙 โหมดมืด / สว่าง
@@ -1160,12 +1259,14 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
   reportSessionId = sessionId;
   const request = ++reportRequestVersion;
   latestExportData = null;
+  resetBehaviorEventView();
   setTextIfPresent("reportPageTitle", sessionName || "รายงานรอบวิเคราะห์");
   showAppView("report");
   setTextIfPresent("reportBackLabel", reportReturnHash === "#analysis" ? "กลับไปหน้าวิเคราะห์" : "กลับไปประวัติ");
   setTextIfPresent("reportPageStatus", "กำลังโหลดรายงาน...");
   document.getElementById("reportPage").setAttribute("aria-busy", "true");
   document.getElementById("reportContent").classList.add("hidden");
+  document.getElementById("reportPartialNotice")?.classList.add("hidden");
   document.getElementById("reportDownloadActions").classList.add("hidden");
   document.getElementById("reportRetryButton").classList.add("hidden");
   document.getElementById("reportMethodologySection").open = false;
@@ -1189,6 +1290,7 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
     const periods = reportPeriodData(latestExportData);
     const tracking = reportTrackingData(latestExportData);
     const session = tracking?.session || {};
+    document.getElementById("reportPartialNotice")?.classList.toggle("hidden", session.status !== "cancelled");
     const reportBehavior = getReportBehavior(s);
 
     const set = (id, text) => {
@@ -1255,7 +1357,9 @@ async function exportReport(sessionId = currentLab, sessionName = currentSession
     renderAnalysisMethodology(methodology);
     document.getElementById("reportContent").classList.remove("hidden");
     document.getElementById("reportDownloadActions").classList.remove("hidden");
-    set("reportPageStatus", s.total_records ? "" : "รอบนี้ยังไม่มีข้อมูลการวิเคราะห์ที่บันทึกไว้");
+    set("reportPageStatus", session.status === "cancelled" ? "รอบนี้หยุดก่อนวิเคราะห์ครบคลิป แสดงผลเท่าที่ตรวจได้"
+      : s.total_records ? "" : "รอบนี้ยังไม่มีข้อมูลการวิเคราะห์ที่บันทึกไว้");
+    acknowledgeAnalysisReport(sessionId, session.status);
   } catch (e) {
     if (request !== reportRequestVersion) return;
     console.error("Error fetching export data:", e);
@@ -1409,11 +1513,14 @@ function initCharts() {
 
 // 📊 อัปเดตข้อมูลกราฟ
 async function updateCharts() {
-  if (!currentLab) return;
+  const sessionId = currentLab;
+  const version = analysisViewVersion;
+  if (!analysisViewIsCurrent(sessionId, version)) return;
 
   try {
     const res = await apiFetch(`/api/stats/${currentLab}`);
     const data = await res.json();
+    if (!analysisViewIsCurrent(sessionId, version)) return;
 
     if (attentionChart && data.labels) {
       attentionChart.data.labels = data.labels;
@@ -1446,11 +1553,14 @@ async function updateCharts() {
 
 // 📝 อัปเดต Activity Log
 async function updateActivityLog() {
-  if (!currentLab) return;
+  const sessionId = currentLab;
+  const version = analysisViewVersion;
+  if (!analysisViewIsCurrent(sessionId, version)) return;
 
   try {
     const res = await apiFetch(`/api/activities/${currentLab}`);
     const data = await res.json();
+    if (!analysisViewIsCurrent(sessionId, version)) return;
 
     const activityList = document.getElementById("activityList");
     if (!activityList || !data.activities) return;
@@ -1507,6 +1617,7 @@ function stopChartUpdates() {
 
 document.addEventListener("DOMContentLoaded", function () {
   setupEvidenceViewer();
+  setupBehaviorEventControls();
   updateModeToggle();
 
   const savedDarkMode = localStorage.getItem("darkMode");
@@ -1530,6 +1641,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
 function startAlertPolling() {
   if (alertPollInterval) return; // กันทำซ้ำ
+  if (!appReady || appView !== "analysis" || !isStreamActive(currentLab, currentCamera)) return;
+  alertPollGeneration += 1;
+  alertPollRequest = null;
+  alertCursorReady = false;
+  lastAlertId = 0;
   alertPollInterval = setInterval(pollAlerts, 3000);
   pollAlerts(); // เรียกทันที
 }
@@ -1539,13 +1655,16 @@ function stopAlertPolling() {
     clearInterval(alertPollInterval);
     alertPollInterval = null;
   }
+  alertPollGeneration += 1;
+  alertPollRequest = null;
+  alertCursorReady = false;
+  lastAlertId = 0;
+  document.querySelectorAll("#toastContainer [data-analysis-session]").forEach(toast => toast.remove());
 }
 
 function startSourceStatusPolling() {
   stopSourceStatusPolling();
-  if (!currentLab || currentSourceType !== "video") return;
-  checkSourceStatus();
-  sourceStatusInterval = setInterval(checkSourceStatus, 1000);
+  startAnalysisJobPolling();
 }
 
 function stopSourceStatusPolling() {
@@ -1556,78 +1675,49 @@ function stopSourceStatusPolling() {
 }
 
 async function checkSourceStatus() {
-  if (!currentLab || currentSourceType !== "video") return;
-
-  try {
-    const res = await apiFetch(`/api/sources/${currentLab}/${currentCamera}/status`);
-    if (!res.ok) return;
-    const data = await res.json();
-
-    if (data.source_type === "video" && data.ended) {
-      await handleVideoEnded(data);
-    } else if (data.error) {
-      setConnectionStatus("แหล่งภาพมีปัญหา", "text-red-600");
-      setSourceStatusText(`Error: ${data.error}`, "text-xs font-medium text-red-600");
-      stopSourceStatusPolling();
-    } else if (data.processing_mode === "sampled") {
-      const progress = Number(data.progress_percent || 0).toFixed(1);
-      const position = formatVideoTime(data.position_seconds);
-      const duration = formatVideoTime(data.duration_seconds);
-      setConnectionStatus("กำลังวิเคราะห์คลิปยาว", "text-purple-600");
-      setSourceStatusText(
-        `กำลังวิเคราะห์ ${progress}% | ${position} / ${duration}`,
-        "text-xs font-medium text-purple-600",
-      );
-    }
-  } catch (_) {
-    /* server not running is fine */
-  }
+  return refreshAnalysisJobs();
 }
 
 async function handleVideoEnded(data) {
-  if (autoReportShown || !currentLab) return;
-  autoReportShown = true;
-  sessionCompleted = true;
-  stopSourceStatusPolling();
-
-  if (liveFeedInterval) {
-    clearInterval(liveFeedInterval);
-    liveFeedInterval = null;
-  }
-  stopChartUpdates();
-  stopAlertPolling();
-
-  const label = data.source ? data.source.split(/[\\/]/).pop() : "";
-  setConnectionStatus("คลิปจบแล้ว", "text-blue-600");
-  setSourceStatusText(
-    label ? `■ คลิปจบแล้ว: ${label}` : "■ คลิปจบแล้ว",
-    "text-xs font-medium text-blue-600",
-  );
-  showToast("คลิปวิดีโอจบแล้ว กำลังเตรียมรายงาน", "info");
-
-  await updateLiveFeed();
-  await updateCharts();
-  setTextIfPresent("detectionCount", "คลิปจบแล้ว");
-  activeSources.delete(_srcKey(currentLab, currentCamera));
-  await exportReport();
-  showToast("รายงานพร้อมแล้ว เลือกรูปแบบไฟล์ที่ต้องการดาวน์โหลด", "success");
+  return refreshAnalysisJobs();
 }
 
 async function pollAlerts() {
-  try {
-    const res = await apiFetch(`/api/alerts?since_id=${lastAlertId}`);
-    if (!res.ok) return;
-    const data = await res.json();
-    for (const alert of data.alerts || []) {
-      showToast(alert.message, alert.type);
+  const epoch = analysisJobsEpoch;
+  const generation = alertPollGeneration;
+  const version = analysisViewVersion;
+  const sessionId = currentLab;
+  const cameraId = currentCamera;
+  if (!appReady || appView !== "analysis" || !isStreamActive(sessionId, cameraId)) return;
+  if (alertPollRequest) return alertPollRequest;
+  const request = (async () => {
+    try {
+      const res = await apiFetch(`/api/alerts?since_id=${lastAlertId}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (epoch !== analysisJobsEpoch || generation !== alertPollGeneration || currentCamera !== cameraId
+        || !analysisViewIsCurrent(sessionId, version) || !isStreamActive(sessionId, cameraId)) return;
+      const latest = Number(data.latest_id);
+      if (!Number.isSafeInteger(latest) || latest < 0) return;
+      // Establish a live cursor without replaying the owner's historical alert backlog.
+      if (!alertCursorReady || latest < lastAlertId) {
+        lastAlertId = latest;
+        alertCursorReady = true;
+        return;
+      }
+      for (const alert of data.alerts || []) {
+        if (alert.lab_id === sessionId && alert.id > lastAlertId) showToast(alert.message, alert.type, sessionId);
+      }
+      lastAlertId = latest;
+    } catch (_) {
+      /* Keep the cursor unchanged when the status request fails. */
     }
-    if (data.latest_id > lastAlertId) lastAlertId = data.latest_id;
-  } catch (_) {
-    /* server not running is fine */
-  }
+  })();
+  alertPollRequest = request;
+  try { await request; } finally { if (alertPollRequest === request) alertPollRequest = null; }
 }
 
-function showToast(message, type = "info") {
+function showToast(message, type = "info", sessionId = null) {
   const container = document.getElementById("toastContainer");
   if (!container) return;
 
@@ -1646,12 +1736,17 @@ function showToast(message, type = "info") {
   const bg = colors[type] || "bg-gray-700";
   const label = labels[type] || "ข้อความ";
   const cleanMessage = cleanUiMessage(message);
+  const key = JSON.stringify([type, cleanMessage, sessionId]);
+  if ([...container.children].some(toast => toast.dataset.toastKey === key)) return;
 
   const toast = document.createElement("div");
+  toast.dataset.toastKey = key;
+  if (sessionId) toast.dataset.analysisSession = sessionId;
   toast.className = `${bg} text-white text-sm font-medium px-4 py-3 rounded-lg shadow-lg
     pointer-events-auto opacity-0 transition-opacity duration-300`;
   toast.textContent = `${label}: ${cleanMessage}`;
   container.appendChild(toast);
+  while (container.childElementCount > 3) container.firstElementChild.remove();
 
   // Fade in
   requestAnimationFrame(() => {
@@ -1678,26 +1773,35 @@ function showToast(message, type = "info") {
  * @param {number|string} source - webcam index (0,1,...) หรือ path ไฟล์ .mp4
  * @param {string|null} displayLabel - label ที่แสดงใน UI
  */
-async function setVideoSource(labId, camId, source, displayLabel = null) {
+async function setVideoSource(labId, camId, source, displayLabel = null, operation = null) {
   if (!labId) {
     showToast("กรุณาเริ่มรอบวิเคราะห์ก่อน", "warning");
     return;
   }
+  const ownOperation = !operation;
   try {
+    operation ||= beginSourceOperation("starting", { ...analysisSelection(labId, camId), sourceType: typeof source === "number" ? "webcam" : "video" });
+    await refreshAnalysisJobs();
+    if (!sourceOperationIsCurrent(operation)) return;
+    if (analysisJobsUnavailable || [...analysisJobs.values()].some(analysisJobNeedsStop)) throw new Error("มีงานกำลังทำอยู่ หรือยังตรวจสถานะงานไม่สำเร็จ");
     const res = await apiFetch(`/api/sources/${labId}/${camId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         source,
-        session_name: currentSessionName || labId,
-        room_name: currentRoomName || "ไม่ระบุ",
-        course_name: currentCourseName || "ไม่ระบุ",
-        recording_start: currentRecordingStart || null,
-        analysis_interval_seconds: currentAnalysisInterval,
+        session_name: operation.name,
+        room_name: operation.roomName || "ไม่ระบุ",
+        course_name: operation.courseName || "ไม่ระบุ",
+        recording_start: operation.recordingStart || null,
+        analysis_interval_seconds: operation.interval,
       }),
     });
     const data = await readResponsePayload(res);
-    if (data.ok) {
+    if (!sourceOperationIsCurrent(operation)) return;
+    if (res.ok && data.ok) {
+      const job = registerAnalysisJob({ ...operation, sourceLabel: displayLabel || data.source }, data);
+      if (job.status !== "running") return;
+      if (currentLab !== labId || currentCamera !== camId || appView !== "analysis") return;
       currentSourceType =
         data.source_type || (typeof source === "number" ? "webcam" : "video");
       document.getElementById("stopWebcamBtn")?.classList.toggle(
@@ -1708,14 +1812,12 @@ async function setVideoSource(labId, camId, source, displayLabel = null) {
       );
       autoReportShown = false;
       streamReloadToken += 1;
-      activeSources.add(_srcKey(labId, camId));
       updateCameraFeed();
       startLiveFeed();
       startChartUpdates();
       startAlertPolling();
       updateAnalysisCadence(data);
-      const srcLabel =
-        displayLabel || (typeof source === "number" ? `Webcam ${source}` : source);
+      const srcLabel = analysisSourceName(job);
       setConnectionStatus("เชื่อมต่อแล้ว", "text-green-600");
       if (data.processing_mode === "sampled") {
         showToast(
@@ -1728,18 +1830,12 @@ async function setVideoSource(labId, camId, source, displayLabel = null) {
       _updateSourceStatus(labId, camId, srcLabel);
       startSourceStatusPolling();
     } else {
-      currentSourceType = null;
-      stopSourceStatusPolling();
-      updateAnalysisCadence();
-      setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
-      showToast(`เชื่อมต่อไม่สำเร็จ: ${data.error || ""}`, "alert");
+      throw new Error(data.error || "เชื่อมต่อไม่สำเร็จ");
     }
   } catch (e) {
-    currentSourceType = null;
-    stopSourceStatusPolling();
-    updateAnalysisCadence();
-    setConnectionStatus("เชื่อมต่อไม่สำเร็จ", "text-red-600");
-    showToast(`เชื่อมต่อไม่สำเร็จ: ${e.message}`, "alert");
+    if (!operation || sourceOperationIsCurrent(operation)) showToast(`เชื่อมต่อไม่สำเร็จ: ${e.message}`, "alert");
+  } finally {
+    if (ownOperation && operation) endSourceOperation(operation);
   }
 }
 
@@ -1771,29 +1867,7 @@ function connectWebcam() {
 }
 
 async function stopWebcam() {
-  if (!currentLab || currentSourceType !== "webcam") return;
-  const button = document.getElementById("stopWebcamBtn");
-  if (button) button.disabled = true;
-  try {
-    const response = await apiFetch(
-      `/api/sources/${currentLab}/${currentCamera}`,
-      { method: "DELETE" },
-    );
-    if (!response.ok) throw new Error("หยุดเว็บแคมไม่สำเร็จ");
-    sessionCompleted = true;
-    activeSources.delete(_srcKey(currentLab, currentCamera));
-    currentSourceType = null;
-    stopChartUpdates();
-    stopAlertPolling();
-    setConnectionStatus("จบรอบแล้ว", "text-blue-600");
-    setSourceStatusText("จบรอบแล้ว", "text-xs font-medium text-blue-600");
-    button?.classList.add("hidden");
-    await exportReport();
-  } catch (error) {
-    showToast(error.message, "alert");
-  } finally {
-    if (button) button.disabled = false;
-  }
+  return stopCurrentAnalysis();
 }
 
 function connectVideoFile() {
@@ -1825,6 +1899,9 @@ function connectVideoFile() {
 }
 
 async function uploadAndUseVideo(file) {
+  let operation;
+  try { operation = beginSourceOperation("upload", { ...analysisSelection(), sourceType: "video" }); }
+  catch (error) { showToast(error.message, "warning"); return; }
   const btn = document.getElementById("uploadVideoBtn");
   const oldLabel = btn?.textContent.trim() || "อัปโหลดคลิป";
   if (btn) {
@@ -1842,22 +1919,24 @@ async function uploadAndUseVideo(file) {
       body: formData,
     });
     const data = await readResponsePayload(res);
+    if (!sourceOperationIsCurrent(operation)) return;
 
     if (!res.ok || !data.ok) {
       showToast(`อัปโหลดไม่สำเร็จ: ${data.error || res.statusText}`, "alert");
       return;
     }
 
-    await setVideoSource(currentLab, currentCamera, data.source, data.filename);
+    await setVideoSource(operation.sessionId, operation.camId, data.source, data.filename, operation);
     const input = document.getElementById("videoFileInput");
-    if (input) input.value = "";
+    if (input && sourceOperationIsCurrent(operation)) input.value = "";
   } catch (e) {
-    showToast(`อัปโหลดไม่สำเร็จ: ${e.message}`, "alert");
+    if (sourceOperationIsCurrent(operation)) showToast(`อัปโหลดไม่สำเร็จ: ${e.message}`, "alert");
   } finally {
-    if (btn) {
+    if (btn && sourceOperationIsCurrent(operation)) {
       btn.disabled = false;
       btn.textContent = oldLabel || "อัปโหลดคลิป";
       btn.classList.remove("opacity-60", "cursor-not-allowed");
     }
+    endSourceOperation(operation);
   }
 }

@@ -8,7 +8,9 @@ const sessionHistoryState = {
   sessions: [], query: "", sort: "date", direction: -1, page: 1, pageSize: 10,
 };
 
-function showNewSessionForm() {
+async function showNewSessionForm() {
+  await refreshAnalysisJobs();
+  if (analysisJobBlocksCreation()) { showToast("มีงานกำลังทำอยู่ หรือยังตรวจสถานะงานไม่สำเร็จ", "warning"); return; }
   const dialog = document.getElementById("newSessionDialog");
   if (!dialog.open) dialog.showModal();
   document.getElementById("sessionNameInput")?.focus();
@@ -26,11 +28,13 @@ function showSessionHistory() {
 function showAppView(view) {
   if (typeof closeVideoEvidence === "function") closeVideoEvidence();
   const changed = appView !== view;
+  if (changed) suspendAnalysisView();
   if (view !== "report") {
     reportRequestVersion += 1;
     latestExportData = null;
   }
   appView = view;
+  renderAnalysisJobs();
   for (const [name, id] of [["history", "labMenu"], ["analysis", "labInterface"], ["report", "reportPage"]]) {
     document.getElementById(id)?.classList.toggle("hidden", name !== view);
   }
@@ -39,18 +43,32 @@ function showAppView(view) {
     const heading = { history: "historyTitle", analysis: "currentLabName", report: "reportPageTitle" }[view];
     document.getElementById(heading)?.focus({ preventScroll: true });
   }
+  if (view === "analysis") activateAnalysisView();
 }
 
-function navigateApp(hash, { replace = false } = {}) {
+let appRouteVersion = 0;
+let acceptedAppHash = "#history";
+
+async function navigateApp(hash, { replace = false } = {}) {
+  const request = ++appRouteVersion;
+  if (!await confirmAnalysisNavigation(hash) || request !== appRouteVersion || !appReady) return;
   if (window.location.hash !== hash) {
     window.history[replace ? "replaceState" : "pushState"](null, "", hash);
   }
-  return applyAppRoute();
+  return applyAppRoute({ guarded: true });
 }
 
-async function applyAppRoute() {
+async function applyAppRoute({ guarded = false } = {}) {
   if (!appReady) return;
   const hash = window.location.hash;
+  if (!guarded) {
+    const request = ++appRouteVersion;
+    if (appView === "analysis" && hash !== "#analysis") window.history.replaceState(null, "", acceptedAppHash);
+    const allowed = await confirmAnalysisNavigation(hash);
+    if (!allowed || request !== appRouteVersion || !appReady) return;
+    window.history.replaceState(null, "", hash);
+  }
+  acceptedAppHash = hash;
   if (hash.startsWith("#report/")) {
     let id;
     try { id = decodeURIComponent(hash.slice(8)); } catch { id = ""; }
@@ -66,12 +84,13 @@ async function applyAppRoute() {
     showAppView("analysis");
     return;
   }
-  if (currentLab) {
-    await backToMenu(false);
-    return;
+  if (hash === "#analysis") {
+    const running = [...analysisJobs.values()].filter(job => job.status === "running");
+    if (running.length === 1) return resumeAnalysisJob(running[0].key);
   }
   window.history.replaceState(null, "", "#history");
   showSessionHistory();
+  loadSessionHistory();
 }
 
 function backFromReport() {
@@ -137,6 +156,7 @@ function renderSessionHistory() {
     const attention = historyNumber(item.avg_attention_rate);
     row.innerHTML = `
       <td class="max-w-xs"><a class="font-semibold text-blue-700 hover:underline break-words" href="#report/${encodeURIComponent(item.id)}">${escapeHtml(item.name || item.id)}</a>
+        ${item.status === "cancelled" ? '<span class="ml-2 text-xs text-amber-800">หยุดก่อนจบคลิป</span>' : ""}
         <p class="mt-1 text-xs text-gray-500 break-words">${escapeHtml(item.course_name || "ไม่ระบุวิชา")} | ${escapeHtml(item.room_name || "ไม่ระบุห้อง")}</p></td>
       <td class="whitespace-nowrap">${date ? date.toLocaleDateString("th-TH") : "-"}</td>
       <td class="whitespace-nowrap">${date ? date.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "-"}</td>
@@ -221,19 +241,33 @@ document.addEventListener("DOMContentLoaded", () => {
   renderSessionHistory();
 });
 
-document.addEventListener("classmood:ready", () => {
+document.addEventListener("classmood:ready", async () => {
+  const initialReady = !appReady;
   appReady = true;
-  loadSessionHistory();
-  applyAppRoute();
+  const epoch = analysisJobsEpoch;
+  await loadSessionHistory();
+  if (!appReady || epoch !== analysisJobsEpoch) return;
+  await refreshAnalysisJobs();
+  if (!appReady || epoch !== analysisJobsEpoch) return;
+  startAnalysisJobPolling();
+  if (initialReady) applyAppRoute();
 });
 document.addEventListener("classmood:locked", () => {
   if (typeof closeVideoEvidence === "function") closeVideoEvidence();
   appReady = false;
+  appRouteVersion += 1;
+  clearAnalysisJobs();
   historyRequestVersion += 1;
   reportRequestVersion += 1;
   latestExportData = null;
+  reportSessionId = "";
+  reportReturnHash = "#history";
   sessionHistoryState.sessions = [];
-  closeNewSessionForm();
+  document.getElementById("reportContent")?.classList.add("hidden");
+  document.getElementById("reportDownloadActions")?.classList.add("hidden");
+  setTextIfPresent("reportPageTitle", "รายงานรอบวิเคราะห์");
+  setTextIfPresent("reportPageStatus", "");
+  showSessionHistory();
   renderSessionHistory();
 });
 window.addEventListener("hashchange", applyAppRoute);

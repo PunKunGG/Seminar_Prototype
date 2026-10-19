@@ -119,6 +119,9 @@
 
     <!-- Main Content -->
     <div id="appContent" class="hidden container mx-auto px-6 py-8">
+      <section id="analysisJobsBanner" class="hidden analysis-jobs-banner" aria-label="งานวิเคราะห์">
+        <div id="analysisJobsList"></div>
+      </section>
       <!-- Session Start Menu -->
       <div id="labMenu">
         <div id="sessionHistoryView" class="space-y-6">
@@ -264,6 +267,7 @@
               class="shrink-0 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors">
               ดูรายงาน
             </button>
+            <button id="stopVideoBtn" type="button" onclick="stopCurrentAnalysis()" class="hidden job-stop">หยุดวิเคราะห์</button>
           </div>
         </div>
 
@@ -315,24 +319,36 @@
               </button>
             </div>
             <div id="videoSourcePanel" class="flex flex-wrap items-end gap-3">
-              <div class="min-w-0 w-full sm:w-auto">
-                <label for="recordingStartInput" class="block text-sm font-medium text-gray-700 mb-1">วันที่และเวลาเริ่มบันทึก</label>
-                <input id="recordingStartInput" type="datetime-local"
-                  class="w-full min-w-0 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white" />
+              <div id="videoSourceSettings" class="flex w-full flex-wrap items-end gap-3">
+                <div class="min-w-0 w-full sm:w-auto">
+                  <label for="recordingStartInput" class="block text-sm font-medium text-gray-700 mb-1">วันที่และเวลาเริ่มบันทึก</label>
+                  <input id="recordingStartInput" type="datetime-local"
+                    class="w-full min-w-0 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white" />
+                </div>
+                <input
+                  type="file"
+                  id="videoFileInput"
+                  accept="video/mp4,video/avi,video/quicktime,video/x-matroska,video/webm,.mp4,.avi,.mov,.mkv,.webm"
+                  class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-400 w-full max-w-full bg-white sm:w-64"
+                />
+                <button
+                  id="uploadVideoBtn"
+                  onclick="connectVideoFile()"
+                  class="bg-purple-500 hover:bg-purple-600 text-white text-sm px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                >
+                  อัปโหลดคลิป
+                </button>
               </div>
-              <input
-                type="file"
-                id="videoFileInput"
-                accept="video/mp4,video/avi,video/quicktime,video/x-matroska,video/webm,.mp4,.avi,.mov,.mkv,.webm"
-                class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-400 w-full max-w-full bg-white sm:w-64"
-              />
-              <button
-                id="uploadVideoBtn"
-                onclick="connectVideoFile()"
-                class="bg-purple-500 hover:bg-purple-600 text-white text-sm px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
-              >
-                อัปโหลดคลิป
-              </button>
+              <dl id="activeVideoDetails" class="hidden grid w-full min-w-0 gap-4 text-sm sm:grid-cols-2">
+                <div class="min-w-0">
+                  <dt class="text-gray-600">คลิปของรอบนี้</dt>
+                  <dd id="activeVideoName" class="mt-1 break-words font-medium"></dd>
+                </div>
+                <div class="min-w-0">
+                  <dt class="text-gray-600">วันที่และเวลาเริ่มบันทึก</dt>
+                  <dd id="activeVideoRecordingStart" class="mt-1 break-words font-medium"></dd>
+                </div>
+              </dl>
             </div>
           </div>
           <div class="mt-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-gray-100 pt-4">
@@ -618,6 +634,7 @@
                 <p class="text-sm text-blue-600" id="reportAnalysisMode">
                   รูปแบบการวิเคราะห์: -
                 </p>
+                <p id="reportPartialNotice" class="hidden text-sm text-amber-800 mt-2">รอบนี้หยุดก่อนวิเคราะห์ครบคลิป แสดงผลเท่าที่ตรวจได้</p>
                 <p class="text-xs text-gray-600 mt-2" id="reportPolicyCaption"></p>
               </div>
               <div class="bg-green-50 p-4 rounded-lg">
@@ -787,6 +804,13 @@
                 </span>
               </div>
               <div
+                class="evidence-filters"
+              >
+                <label class="evidence-check"><input id="reportEventsIncludeExcluded" type="checkbox" /> รวมช่วงที่ไม่ผ่านเกณฑ์</label>
+                <label>ID <select id="reportEventsTrack"><option value="">ทุก ID</option></select></label>
+                <label>พฤติกรรม <select id="reportEventsBehavior"><option value="">ทุกพฤติกรรม</option></select></label>
+              </div>
+              <div
                 id="reportBehaviorEventsTableWrapper"
                 class="overflow-x-auto border border-gray-200 rounded-lg"
               >
@@ -809,6 +833,11 @@
                   ></tbody>
                 </table>
               </div>
+              <nav class="evidence-pagination" aria-label="หน้าช่วงพฤติกรรม">
+                <button id="reportEventsPrevious" type="button" class="history-icon-button" aria-label="หน้าก่อนหน้า" title="หน้าก่อนหน้า" disabled>&larr;</button>
+                <span id="reportEventsPage" class="text-xs text-gray-600" aria-live="polite">หน้า 1 / 1</span>
+                <button id="reportEventsNext" type="button" class="history-icon-button" aria-label="หน้าถัดไป" title="หน้าถัดไป" disabled>&rarr;</button>
+              </nav>
             </div>
 
 
@@ -844,6 +873,7 @@
     <script src="auth.js" defer></script>
     <script src="report-pdf.js" defer></script>
     <script src="shared.js" defer></script>
+    <script src="analysis-jobs.js" defer></script>
     <script src="video-evidence.js" defer></script>
     <script src="session-history.js" defer></script>
     <!-- Toast notification container -->
@@ -851,12 +881,25 @@
       id="toastContainer"
       class="fixed bottom-4 left-4 z-50 space-y-2 w-[calc(100%-2rem)] max-w-sm pointer-events-none sm:w-auto"
     ></div>
+    <dialog id="analysisStopDialog" class="session-dialog" aria-labelledby="analysisStopTitle" aria-describedby="analysisStopDescription">
+      <div class="p-6 space-y-4">
+        <h3 id="analysisStopTitle" class="font-semibold"></h3>
+        <p id="analysisStopDescription" class="text-sm text-gray-600"></p>
+        <p id="analysisStopError" class="text-sm text-red-700" role="alert"></p>
+        <div class="flex justify-end gap-3">
+          <button id="analysisStopStay" type="button" class="job-primary">อยู่ต่อ</button>
+          <button id="analysisStopConfirm" type="button" class="job-stop">หยุดและบันทึก</button>
+        </div>
+      </div>
+    </dialog>
     <dialog id="evidenceDialog" class="session-dialog evidence-dialog" aria-labelledby="evidenceDialogTitle">
-      <div class="flex items-center justify-between gap-3 p-4 border-b border-gray-200">
+      <div class="evidence-dialog-header flex items-center justify-between gap-3 p-4 border-b border-gray-200">
         <h3 id="evidenceDialogTitle" class="font-semibold text-sm min-w-0"></h3>
         <button id="evidenceCloseButton" type="button" class="history-icon-button" aria-label="ปิดภาพหลักฐาน" title="ปิดภาพหลักฐาน">&times;</button>
       </div>
-      <img id="evidenceFullImage" alt="" class="evidence-full-image" />
+      <div class="evidence-image-stage">
+        <img id="evidenceFullImage" alt="" class="evidence-full-image" />
+      </div>
     </dialog>
     <dialog id="videoEvidenceDialog" class="session-dialog video-evidence-dialog" aria-labelledby="videoEvidenceTitle">
       <div class="flex items-center justify-between gap-3 p-4 border-b border-gray-200">
@@ -865,6 +908,15 @@
       </div>
       <div class="video-evidence-body">
         <video id="videoEvidencePlayer" controls playsinline preload="metadata" aria-label="คลิปต้นฉบับของช่วงพฤติกรรม"></video>
+        <fieldset class="evidence-playback-mode">
+          <legend class="text-sm font-medium">การเล่นหลักฐาน</legend>
+          <div class="evidence-mode-options">
+            <label><input type="radio" name="videoEvidenceMode" value="observed" checked /><span>ช่วงตรวจจริง</span></label>
+            <label><input type="radio" name="videoEvidenceMode" value="context" /><span>ดูบริบท ±3 วินาที</span></label>
+          </div>
+        </fieldset>
+        <p id="videoEvidenceRanges" class="text-sm text-gray-600"></p>
+        <p id="videoEvidenceContextNote" class="hidden text-sm text-amber-800">บริบทนอกช่วงที่เลือกใช้ตรวจสอบคลิปเท่านั้น ไม่เพิ่มเวลาในรายงาน</p>
         <div class="video-evidence-controls">
           <div class="video-evidence-person"><img id="videoEvidencePortrait" width="80" height="80" alt="" /><span id="videoEvidencePerson"></span></div>
           <div class="video-evidence-selection"><label for="videoEvidenceSegment" class="block text-sm font-medium mb-1">ช่วงที่ตรวจจริงในคลิป</label><select id="videoEvidenceSegment" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"></select></div>

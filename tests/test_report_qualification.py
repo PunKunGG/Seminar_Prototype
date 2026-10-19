@@ -333,6 +333,37 @@ class PoseGeometryTests(unittest.TestCase):
         self.assertIn("position_anchor", result)
         self.assertNotIn("portrait_bbox", result)
 
+    def test_confident_masked_head_points_cannot_expand_portrait_to_whole_frame(self):
+        points = self.points()
+        points[3] = [0, 0, 0.95]
+        points[4] = [0, 0, 0.95]
+        result = report_geometry(points, [50, 20, 150, 250], (300, 200, 3), 0.4)
+        self.assertLess(result["portrait_bbox"][2] - result["portrait_bbox"][0], 100)
+        self.assertAlmostEqual((result["portrait_bbox"][0] + result["portrait_bbox"][2]) / 2, 100)
+
+    def test_masked_or_out_of_frame_head_uses_original_even_with_high_confidence(self):
+        points = self.points()
+        for index in range(5):
+            points[index] = [0, 0, 0.95]
+        points[0] = [100, 70, 0.95]
+        points[1] = [250, 60, 0.95]
+        result = report_geometry(points, [50, 20, 150, 250], (300, 200, 3), 0.4)
+        self.assertIn("position_anchor", result)
+        self.assertNotIn("portrait_bbox", result)
+
+    def test_masked_shoulder_is_not_a_valid_portrait_anchor(self):
+        points = self.points()
+        points[5] = [0, 0, 0.95]
+        self.assertEqual(report_geometry(points, [50, 20, 150, 250], (300, 200, 3), 0.4), {})
+
+    def test_visible_points_on_frame_edge_are_kept(self):
+        points = self.points()
+        points[0] = [0, 70, 0.95]
+        points[1] = [0, 60, 0.95]
+        points[2][2] = 0
+        result = report_geometry(points, [0, 20, 150, 250], (300, 200, 3), 0.4)
+        self.assertIn("portrait_bbox", result)
+
     def test_side_profile_uses_visible_nose_and_ear_with_shoulders(self):
         points = self.points()
         points[1][2] = points[2][2] = 0

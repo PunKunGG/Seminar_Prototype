@@ -10,6 +10,7 @@
   let authEnabled = false;
   let exchangeToken = "";
   let exchangePromise = null;
+  let applicationUserId = null;
 
   function element(id) {
     return document.getElementById(id);
@@ -36,6 +37,7 @@
   }
 
   function showLogin(message = "กรุณาเข้าสู่ระบบเพื่อใช้งาน") {
+    applicationUserId = null;
     document.dispatchEvent(new Event("classmood:locked"));
     element("authGate")?.classList.remove("hidden");
     element("appHeader")?.classList.add("hidden");
@@ -44,6 +46,9 @@
   }
 
   function showApplication(user = null) {
+    const userId = user?.id || "local";
+    if (applicationUserId !== userId) document.dispatchEvent(new Event("classmood:locked"));
+    applicationUserId = userId;
     element("authGate")?.classList.add("hidden");
     element("appHeader")?.classList.remove("hidden");
     element("appContent")?.classList.remove("hidden");

@@ -8,9 +8,13 @@ let sourceOperation = null;
 let analysisStopRequest = null;
 let analysisViewVersion = 0;
 
+function analysisJobNeedsStop(job) {
+  return job?.status === "running" || job?.status === "error";
+}
+
 function analysisJobBlocksCreation() {
   return !analysisJobsReady || analysisJobsUnavailable || Boolean(sourceOperation)
-    || [...analysisJobs.values()].some(job => job.status === "running" || job.stopping);
+    || [...analysisJobs.values()].some(job => analysisJobNeedsStop(job) || job.stopping);
 }
 
 function analysisSelection(sessionId = currentLab, camId = currentCamera) {
@@ -37,10 +41,10 @@ function endSourceOperation(operation) {
 function registerAnalysisJob(selection, state) {
   const key = _srcKey(selection.sessionId, selection.camId);
   const existing = analysisJobs.get(key);
-  const job = existing || { key, state, status: "running", notified: false };
+  const job = existing || { key, state, status: state.error ? "error" : "running", notified: false };
   Object.assign(job, selection, { sourceType: state.source_type });
   analysisJobs.set(key, job);
-  if (job.status === "running") activeSources.add(key);
+  if (analysisJobNeedsStop(job)) activeSources.add(key);
   renderAnalysisJobs();
   return job;
 }
@@ -51,7 +55,7 @@ function analysisJobStatusText(job) {
   if (job.status === "completed") return "วิเคราะห์เสร็จแล้ว";
   if (job.status === "stopped") return "หยุดก่อนจบคลิป เก็บผลเท่าที่ตรวจได้";
   if (job.status === "interrupted") return "ไม่พบงานที่กำลังทำบนเซิร์ฟเวอร์ ดูผลที่บันทึกไว้ได้";
-  if (job.status === "error") return "การวิเคราะห์มีปัญหา ดูผลที่บันทึกไว้ได้";
+  if (job.status === "error") return "การวิเคราะห์มีปัญหา กรุณาหยุดและบันทึกเพื่อปิดแหล่งภาพ";
   const progress = job.state.progress_percent;
   return Number.isFinite(progress) ? `กำลังวิเคราะห์ ${formatDecimal(progress)}%`
     : job.sourceType === "webcam" ? "เว็บแคมกำลังเปิดอยู่" : "กำลังวิเคราะห์วิดีโอ";
@@ -106,7 +110,7 @@ function renderAnalysisJobs() {
   const section = document.getElementById("analysisJobsBanner");
   const list = document.getElementById("analysisJobsList");
   if (!section || !list) return;
-  const visibleJobs = [...analysisJobs.values()].filter(job => job.status === "running" || job.stopping || !job.reportViewed);
+  const visibleJobs = [...analysisJobs.values()].filter(job => analysisJobNeedsStop(job) || job.stopping || !job.reportViewed);
   section.classList.toggle("hidden", !appReady || appView !== "history"
     || (!visibleJobs.length && !sourceOperation && !analysisJobsUnavailable));
   let html = visibleJobs.map(job => `
@@ -114,8 +118,9 @@ function renderAnalysisJobs() {
       <div class="min-w-0"><p class="font-semibold break-words">${escapeHtml(job.name)}</p>
         <p class="text-sm text-gray-600" role="status">${escapeHtml(analysisJobStatusText(job))}</p></div>
       <div class="analysis-job-actions">${job.status === "running"
-        ? `<button type="button" data-resume-job="${escapeHtml(job.key)}" class="job-primary">กลับไปหน้าวิเคราะห์</button>
-           <button type="button" data-stop-job="${escapeHtml(job.key)}" class="job-stop" ${job.stopping ? "disabled" : ""}>หยุด${job.sourceType === "webcam" ? "และบันทึก" : "วิเคราะห์"}</button>`
+        ? `<button type="button" data-resume-job="${escapeHtml(job.key)}" class="job-primary">กลับไปหน้าวิเคราะห์</button>` : ""}
+        ${analysisJobNeedsStop(job)
+        ? `<button type="button" data-stop-job="${escapeHtml(job.key)}" class="job-stop" ${job.stopping ? "disabled" : ""}>หยุด${job.status === "error" || job.sourceType === "webcam" ? "และบันทึก" : "วิเคราะห์"}</button>`
         : `<button type="button" data-report-job="${escapeHtml(job.key)}" class="job-primary">ดูรายงาน</button>`}</div>
     </div>`).join("");
   if (sourceOperation) html += `<div class="analysis-job-row"><div class="min-w-0"><p class="font-semibold break-words">${escapeHtml(sourceOperation.name)}</p><p class="text-sm text-gray-600">${sourceOperation.kind === "upload" ? "กำลังอัปโหลดคลิป..." : "กำลังเริ่มแหล่งภาพ..."}</p></div></div>`;
@@ -129,15 +134,22 @@ function renderAnalysisJobs() {
   if (create) create.disabled = analysisJobBlocksCreation();
   const stopVideo = document.getElementById("stopVideoBtn");
   const current = analysisJobs.get(_srcKey(currentLab, currentCamera));
-  if (stopVideo) stopVideo.classList.toggle("hidden", current?.sourceType !== "video" || current.status !== "running");
-  if (current?.sourceType === "webcam") document.getElementById("stopWebcamBtn")?.classList.toggle("hidden", current.status !== "running");
+  if (stopVideo) {
+    stopVideo.classList.toggle("hidden", current?.sourceType !== "video" || !analysisJobNeedsStop(current));
+    stopVideo.disabled = Boolean(current?.stopping);
+  }
+  const stopWebcam = document.getElementById("stopWebcamBtn");
+  if (stopWebcam && current?.sourceType === "webcam") {
+    stopWebcam.classList.toggle("hidden", !analysisJobNeedsStop(current));
+    stopWebcam.disabled = Boolean(current.stopping);
+  }
   renderCurrentSourceControls();
 }
 
 function acknowledgeAnalysisReport(sessionId, reportStatus) {
   if (!["completed", "cancelled"].includes(reportStatus)) return;
   for (const job of analysisJobs.values()) {
-    if (job.sessionId === sessionId && job.status !== "running" && !job.stopping) job.reportViewed = true;
+    if (job.sessionId === sessionId && !analysisJobNeedsStop(job) && !job.stopping) job.reportViewed = true;
   }
   renderAnalysisJobs();
 }
@@ -168,7 +180,7 @@ async function resumeAnalysisJob(key) {
   const job = analysisJobs.get(key);
   if (!job || job.status !== "running") return;
   const current = analysisJobs.get(_srcKey(currentLab, currentCamera));
-  if (current?.key !== key && current?.sourceType === "webcam" && current.status === "running"
+  if (current?.key !== key && current?.sourceType === "webcam" && analysisJobNeedsStop(current)
     && !await requestAnalysisStop(current)) return;
   if (!appReady || !analysisJobs.has(key) || job.status !== "running") return;
   suspendAnalysisView();
@@ -180,7 +192,7 @@ async function resumeAnalysisJob(key) {
   currentAnalysisInterval = job.interval || 30;
   currentRecordingStart = job.recordingStart || "";
   resetDashboardState();
-  for (const running of analysisJobs.values()) if (running.status === "running") activeSources.add(running.key);
+  for (const running of analysisJobs.values()) if (analysisJobNeedsStop(running)) activeSources.add(running.key);
   currentSourceType = job.sourceType;
   renderSourceMode(job.sourceType);
   document.getElementById("stopWebcamBtn")?.classList.toggle("hidden", job.sourceType !== "webcam");
@@ -211,7 +223,7 @@ async function refreshAnalysisJobs() {
       let discovered = false;
       for (const [key, state] of Object.entries(sources)) {
         const match = /^(.*)\/(\d+)$/.exec(key);
-        if (!match || !state.active || analysisJobs.has(key)) continue;
+        if (!match || (!state.active && !state.error) || analysisJobs.has(key)) continue;
         const metadata = sessionHistoryState.sessions.find(item => item.id === match[1]);
         registerAnalysisJob({ sessionId: match[1], camId: Number(match[2]), name: metadata?.name || match[1],
           roomName: metadata?.room_name, courseName: metadata?.course_name,
@@ -229,14 +241,14 @@ async function refreshAnalysisJobs() {
           courseName: metadata.course_name, interval: metadata.analysis_interval_seconds,
           recordingStart: metadata.recording_started_at || job.recordingStart,
           sourceLabel: metadata.source_label || job.sourceLabel });
-        if (job.status !== "running" || job.stopping) continue;
+        if (!analysisJobNeedsStop(job) || job.stopping) continue;
         const state = sources[job.key];
         if (!state) {
-          if (knownKeys.has(job.key)) { job.status = "interrupted"; activeSources.delete(job.key); }
+          if (knownKeys.has(job.key) && job.status !== "error") { job.status = "interrupted"; activeSources.delete(job.key); }
           continue;
         }
         job.state = state;
-        if (state.error) { job.status = "error"; activeSources.delete(job.key); }
+        if (state.error) { job.status = "error"; activeSources.add(job.key); }
         else if (state.ended) {
           job.status = "completed";
           activeSources.delete(job.key);
@@ -333,8 +345,11 @@ function requestAnalysisStop(job) {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
   analysisStopRequest = { key: job.key, job, promise, resolve, opener, openerAction: jobActionReference(opener), epoch: analysisJobsEpoch, busy: false };
-  setTextIfPresent("analysisStopTitle", job.sourceType === "webcam" ? "หยุดเว็บแคมก่อนออกหรือไม่" : "หยุดวิเคราะห์ก่อนจบคลิปหรือไม่");
-  setTextIfPresent("analysisStopDescription", job.sourceType === "webcam"
+  setTextIfPresent("analysisStopTitle", job.status === "error" ? "หยุดแหล่งภาพที่มีปัญหาหรือไม่"
+    : job.sourceType === "webcam" ? "หยุดเว็บแคมก่อนออกหรือไม่" : "หยุดวิเคราะห์ก่อนจบคลิปหรือไม่");
+  setTextIfPresent("analysisStopDescription", job.status === "error"
+    ? "ระบบจะปิดแหล่งภาพที่มีปัญหาและบันทึกผลเท่าที่ตรวจได้ก่อนปิดรอบนี้"
+    : job.sourceType === "webcam"
     ? "หยุดกล้องและบันทึกผลรอบนี้ก่อนออกจากหน้าวิเคราะห์"
     : "ระบบจะเก็บผลเท่าที่ตรวจได้ และระบุว่ารอบนี้หยุดก่อนวิเคราะห์ครบคลิป");
   setTextIfPresent("analysisStopError", "");
@@ -350,12 +365,12 @@ async function confirmAnalysisNavigation(hash) {
   if (appView !== "analysis" || hash === "#analysis") return true;
   if (sourceOperation?.sourceType === "webcam") { showToast("กำลังเริ่มเว็บแคม กรุณารอสักครู่", "warning"); return false; }
   const webcam = analysisJobs.get(_srcKey(currentLab, currentCamera));
-  return webcam?.sourceType === "webcam" && webcam.status === "running" ? requestAnalysisStop(webcam) : true;
+  return webcam?.sourceType === "webcam" && analysisJobNeedsStop(webcam) ? requestAnalysisStop(webcam) : true;
 }
 
 async function stopCurrentAnalysis() {
   const job = analysisJobs.get(_srcKey(currentLab, currentCamera));
-  if (job?.status !== "running") return;
+  if (!analysisJobNeedsStop(job)) return;
   if (await requestAnalysisStop(job) && appReady && appView === "analysis" && currentLab === job.sessionId) await exportReport(job.sessionId, job.name);
 }
 

@@ -102,8 +102,8 @@ function setupVideoEvidenceViewer() {
     if (!player.paused && dialog.open) videoEvidenceAnimation = requestAnimationFrame(watchFrames);
   };
   const updateRanges = () => {
-    const observed = observedBounds();
-    const clamped = observed.end < selectedSegment().end;
+    const observed = selectedSegment();
+    const clamped = observedBounds().end < observed.end;
     setTextIfPresent("videoEvidenceRanges", `ช่วงตรวจจริง ${evidenceTime(observed.start)} - ${evidenceTime(observed.end)} | ช่วงเล่น ${evidenceTime(bounds().start)} - ${evidenceTime(bounds().end)} ในคลิปต้นฉบับ${clamped ? " (จำกัดจุดจบตามความยาวคลิป)" : ""}`);
   };
   const chooseSegment = () => {

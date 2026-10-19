@@ -948,8 +948,6 @@ function resetDashboardState() {
 // 🎥 เริ่มรอบวิเคราะห์
 function startSession() {
   if (analysisJobBlocksCreation()) { showToast("มีงานกำลังทำอยู่ หรือยังตรวจสถานะงานไม่สำเร็จ", "warning"); return; }
-  for (const [key, job] of analysisJobs) if (job.status !== "running") analysisJobs.delete(key);
-  renderAnalysisJobs();
   const input = document.getElementById("sessionNameInput");
   const name = input?.value.trim() || getDefaultSessionName();
   currentRoomName =
@@ -961,6 +959,10 @@ function startSession() {
     showToast("ช่วงสรุปผลต้องอยู่ระหว่าง 15-300 วินาที", "warning");
     return;
   }
+  for (const [key, job] of analysisJobs) {
+    if (job.reportViewed && !analysisJobNeedsStop(job) && !job.stopping) analysisJobs.delete(key);
+  }
+  renderAnalysisJobs();
   currentAnalysisInterval = interval;
   currentRecordingStart = "";
   closeNewSessionForm();
@@ -1781,7 +1783,7 @@ async function setVideoSource(labId, camId, source, displayLabel = null, operati
     operation ||= beginSourceOperation("starting", { ...analysisSelection(labId, camId), sourceType: typeof source === "number" ? "webcam" : "video" });
     await refreshAnalysisJobs();
     if (!sourceOperationIsCurrent(operation)) return;
-    if (analysisJobsUnavailable || [...analysisJobs.values()].some(job => job.status === "running")) throw new Error("มีงานกำลังทำอยู่ หรือยังตรวจสถานะงานไม่สำเร็จ");
+    if (analysisJobsUnavailable || [...analysisJobs.values()].some(analysisJobNeedsStop)) throw new Error("มีงานกำลังทำอยู่ หรือยังตรวจสถานะงานไม่สำเร็จ");
     const res = await apiFetch(`/api/sources/${labId}/${camId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

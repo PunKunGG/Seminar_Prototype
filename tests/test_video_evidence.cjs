@@ -184,3 +184,17 @@ test("a duration change that invalidates the segment disables playback safely", 
   assert.equal(f.element("videoEvidenceReplay").disabled, true);
   assert.equal(f.element("videoEvidenceRanges").textContent, "");
 });
+
+test("clamped playback keeps the saved observed range in both playback modes", () => {
+  const f = fixture(9, 12);
+  f.player.duration = 10;
+  f.player.emit("durationchange");
+  assert.match(f.element("videoEvidenceRanges").textContent, /ช่วงตรวจจริง 00:09 - 00:12 \| ช่วงเล่น 00:09 - 00:10/);
+  assert.match(f.element("videoEvidenceRanges").textContent, /จำกัดจุดจบตามความยาวคลิป/);
+  f.element("contextMode").checked = true;
+  f.element("contextMode").emit("change");
+  f.player.settleSeek();
+  assert.match(f.element("videoEvidenceRanges").textContent, /ช่วงตรวจจริง 00:09 - 00:12 \| ช่วงเล่น 00:06 - 00:10/);
+  assert.equal(vm.runInContext("videoEvidenceState.segments[0].end", f.context), 12);
+  assert.equal(f.player.currentTime, 6);
+});

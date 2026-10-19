@@ -9,6 +9,7 @@ function fixture() {
   const callbacks = [];
   const calls = [];
   const intervals = new Map();
+  const documentEvents = new Map();
   let nextTimer = 0;
   const document = { activeElement: null, querySelectorAll: () => [], createElement: () => element("created"),
     addEventListener() {}, getElementById: id => element(id) };
@@ -35,7 +36,13 @@ function fixture() {
     setInterval(callback, delay) { const id = ++nextTimer; intervals.set(id, { callback, delay }); return id; },
     clearInterval(id) { intervals.delete(id); }, FormData: class { append() {} } });
   for (const filename of ["shared.js", "analysis-jobs.js", "video-evidence.js", "session-history.js"]) {
-    document.addEventListener = (type, callback) => { if (filename === "analysis-jobs.js" && type === "DOMContentLoaded") callbacks.push(callback); };
+    document.addEventListener = (type, callback) => {
+      if (filename === "analysis-jobs.js" && type === "DOMContentLoaded") callbacks.push(callback);
+      if (type.startsWith("classmood:")) {
+        if (!documentEvents.has(type)) documentEvents.set(type, []);
+        documentEvents.get(type).push(callback);
+      }
+    };
     vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "dashboard", filename), "utf8"), context);
   }
   for (const callback of callbacks) callback();
@@ -52,8 +59,146 @@ function fixture() {
   };
   const run = code => vm.runInContext(code, context);
   const job = (type = "video") => run(`registerAnalysisJob(analysisSelection(), {source_type:'${type}',active:true})`);
-  return { context, element, calls, run, job, location, intervals, reportLoader };
+  const emitDocument = type => Promise.all((documentEvents.get(type) || []).map(callback => callback()));
+  return { context, element, calls, run, job, location, intervals, reportLoader, emitDocument };
 }
+
+test("starting a round keeps every unread terminal notice and only prunes acknowledged jobs", () => {
+  const f = fixture();
+  for (const status of ["completed", "stopped", "interrupted", "failed"]) {
+    f.run(`registerAnalysisJob({sessionId:'${status}',camId:1,name:'${status}'},{source_type:'video'}).status='${status}'`);
+  }
+  f.run("registerAnalysisJob({sessionId:'read',camId:1,name:'Read'},{source_type:'video'}).status='completed';acknowledgeAnalysisReport('read','completed')");
+  f.element("sessionNameInput").value = "Next round";
+  f.element("analysisIntervalInput").value = "30";
+  f.run("makeSessionId=()=> 'new-round';openAnalysisSession=(id)=>{currentLab=id;showAppView('analysis')};startSession();showAppView('history')");
+  assert.equal(f.run("currentLab"), "new-round");
+  assert.equal(f.run("analysisJobs.has('read/1')"), false);
+  for (const status of ["completed", "stopped", "interrupted", "failed"]) {
+    assert.equal(f.run(`analysisJobs.has('${status}/1')`), true);
+    assert.match(f.element("analysisJobsList").innerHTML, new RegExp(`data-report-job="${status}/1"`));
+  }
+});
+
+test("same-account ready events refresh data without closing a draft or reloading a report", async () => {
+  const f = fixture();
+  f.context.routeCalls = 0;
+  f.context.historyCalls = 0;
+  f.run("appReady=false;appView='history';window.location.hash='#history';const originalRoute=applyAppRoute;applyAppRoute=()=>{routeCalls++;return originalRoute()};loadSessionHistory=async()=>{historyCalls++}");
+  await f.emitDocument("classmood:ready");
+  assert.equal(f.context.routeCalls, 1);
+  const initialHistoryCalls = f.context.historyCalls;
+  await f.run("showNewSessionForm()");
+  f.element("sessionNameInput").value = "Unfinished lesson";
+  f.element("courseNameInput").value = "AI";
+  const opener = f.context.document.activeElement;
+  await f.emitDocument("classmood:ready");
+  assert.equal(f.element("newSessionDialog").open, true);
+  assert.equal(f.element("sessionNameInput").value, "Unfinished lesson");
+  assert.equal(f.element("courseNameInput").value, "AI");
+  assert.equal(f.context.document.activeElement, opener);
+  f.run("appView='report';window.location.hash='#report/round';latestExportData={lab_id:'round'}");
+  await f.emitDocument("classmood:ready");
+  assert.equal(f.run("latestExportData.lab_id"), "round");
+  assert.equal(f.context.routeCalls, 1);
+  assert.equal(f.context.historyCalls, initialHistoryCalls + 2);
+  await f.emitDocument("classmood:locked");
+  await f.emitDocument("classmood:ready");
+  assert.equal(f.context.routeCalls, 2);
+});
+
+test("an old initial ready event cannot apply its route after an account lock", async () => {
+  const f = fixture();
+  let finish;
+  f.context.routeCalls = 0;
+  f.context.loadSessionHistory = () => new Promise(resolve => { finish = resolve; });
+  f.run("appReady=false;applyAppRoute=()=>{routeCalls++}");
+  const oldReady = f.emitDocument("classmood:ready");
+  await f.emitDocument("classmood:locked");
+  f.context.loadSessionHistory = async () => {};
+  await f.emitDocument("classmood:ready");
+  finish(); await oldReady;
+  assert.equal(f.context.routeCalls, 1);
+});
+
+test("errored workers keep explicit cleanup in history and analysis and block new sources", async () => {
+  for (const type of ["video", "webcam"]) {
+    const f = fixture(); const job = f.job(type);
+    f.context.sources = {"round/1": {active:false,ended:false,error:"Decode failed",source_type:type}};
+    await f.run("refreshAnalysisJobs()");
+    f.run("showAppView('history');acknowledgeAnalysisReport('round','completed')");
+    assert.equal(job.status, "error");
+    assert.equal(f.run("analysisJobBlocksCreation()"), true);
+    assert.equal(f.run("activeSources.has('round/1')"), true);
+    assert.notEqual(job.reportViewed, true);
+    assert.match(f.element("analysisJobsList").innerHTML, /data-stop-job="round\/1"/);
+    assert.doesNotMatch(f.element("analysisJobsList").innerHTML, /data-report-job="round\/1"/);
+    assert.equal(f.element(type === "video" ? "stopVideoBtn" : "stopWebcamBtn").classList.contains("hidden"), false);
+    await f.run("setVideoSource('fresh',1,'clip.mp4')");
+    assert.ok(!f.calls.some(call => call.method === "POST"));
+  }
+});
+
+test("reconnecting discovers inactive errored sources that still need DELETE", async () => {
+  const f = fixture();
+  f.context.sources = {"broken/1": {active:false,ended:false,error:"Cannot open",source_type:"video"}};
+  f.run("appView='history'");
+  await f.run("refreshAnalysisJobs()");
+  assert.equal(f.run("analysisJobs.get('broken/1').status"), "error");
+  assert.equal(f.run("analysisJobBlocksCreation()"), true);
+  assert.match(f.element("analysisJobsList").innerHTML, /data-stop-job="broken\/1"/);
+});
+
+test("foreground error cleanup saves once before opening its final report", async () => {
+  const f = fixture(); const job = f.job(); job.status = "error";
+  f.context.sessions = [{id:"round",status:"cancelled"}];
+  const stopping = f.run("stopCurrentAnalysis()");
+  assert.equal(f.element("analysisStopDialog").open, true);
+  await Promise.all([f.element("analysisStopConfirm").emit("click"), f.element("analysisStopConfirm").emit("click")]);
+  await stopping;
+  assert.equal(f.calls.filter(call => call.method === "DELETE").length, 1);
+  assert.equal(job.status, "stopped");
+  assert.equal(f.run("analysisJobBlocksCreation()"), false);
+  assert.equal(f.run("activeSources.has('round/1')"), false);
+  assert.equal(f.calls.filter(call => call.report === "round").length, 1);
+});
+
+test("failed error cleanup stays actionable until saving is verified, even after the source disappears", async () => {
+  const f = fixture(); const job = f.job(); job.status = "error";
+  f.context.sessions = [{id:"round",status:"active"}];
+  let deleteOk = false;
+  f.context.apiFetch = async (url, options = {}) => {
+    f.calls.push({url,...options});
+    return {ok:options.method !== "DELETE" || deleteOk,json:async()=>url === "/api/sources" ? {} : {sessions:f.context.sessions}};
+  };
+  const stopping = f.run("stopCurrentAnalysis()");
+  await f.element("analysisStopConfirm").emit("click");
+  assert.match(f.element("analysisStopError").textContent, /ไม่สำเร็จ/);
+  deleteOk = true;
+  await f.element("analysisStopConfirm").emit("click");
+  assert.match(f.element("analysisStopError").textContent, /ยืนยันการบันทึก/);
+  await f.run("refreshAnalysisJobs()");
+  assert.equal(job.status, "error");
+  assert.equal(f.run("analysisJobBlocksCreation()"), true);
+  assert.equal(f.element("analysisStopDialog").open, true);
+  f.context.sessions = [{id:"round",status:"cancelled"}];
+  await f.element("analysisStopConfirm").emit("click");
+  await stopping;
+  assert.equal(job.status, "stopped");
+  assert.equal(f.run("analysisJobBlocksCreation()"), false);
+});
+
+test("leaving an errored webcam still supports Stay without stopping the source", async () => {
+  const f = fixture(); const job = f.job("webcam"); job.status = "error";
+  const opener = f.element("back"); opener.focus();
+  const navigating = f.run("backToMenu()");
+  assert.equal(f.element("analysisStopDialog").open, true);
+  f.element("analysisStopDialog").close("stay");
+  await navigating;
+  assert.equal(f.location.hash, "#analysis");
+  assert.equal(f.context.document.activeElement, opener);
+  assert.ok(!f.calls.some(call => call.method === "DELETE"));
+});
 
 test("video navigation leaves capture running and preserves the round", async () => {
   const f = fixture();

@@ -242,6 +242,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 document.addEventListener("classmood:ready", async () => {
+  const initialReady = !appReady;
   appReady = true;
   const epoch = analysisJobsEpoch;
   await loadSessionHistory();
@@ -249,7 +250,7 @@ document.addEventListener("classmood:ready", async () => {
   await refreshAnalysisJobs();
   if (!appReady || epoch !== analysisJobsEpoch) return;
   startAnalysisJobPolling();
-  applyAppRoute();
+  if (initialReady) applyAppRoute();
 });
 document.addEventListener("classmood:locked", () => {
   if (typeof closeVideoEvidence === "function") closeVideoEvidence();

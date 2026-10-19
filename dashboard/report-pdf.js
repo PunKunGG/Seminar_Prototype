@@ -9,14 +9,35 @@ function waitForReportImages(root, timeoutMs = 5000) {
     images.map(
       (image) =>
         new Promise((resolve) => {
-          if (image.complete) {
+          const done = () => {
+            image.removeEventListener("load", loaded);
+            image.removeEventListener("error", failed);
+            clearTimeout(timer);
             resolve();
-            return;
+          };
+          const loaded = () => {
+            const originalUrl = image.closest("button[data-evidence-url]")?.dataset.evidenceUrl;
+            if (originalUrl && useOriginalForPaddedPortrait(image, originalUrl)) return;
+            done();
+          };
+          const failed = () => {
+            const originalUrl = image.closest("button[data-evidence-url]")?.dataset.evidenceUrl;
+            if (originalUrl && image.src !== originalUrl) {
+              image.src = originalUrl;
+              return;
+            }
+            image.hidden = true;
+            const button = image.closest("button[data-evidence-url]");
+            if (button) button.disabled = true;
+            done();
+          };
+          const timer = setTimeout(done, timeoutMs);
+          image.addEventListener("load", loaded);
+          image.addEventListener("error", failed);
+          if (image.complete) {
+            if (image.naturalWidth) loaded();
+            else failed();
           }
-          const done = () => resolve();
-          image.addEventListener("load", done, { once: true });
-          image.addEventListener("error", done, { once: true });
-          setTimeout(done, timeoutMs);
         }),
     ),
   );

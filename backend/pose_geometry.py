@@ -12,6 +12,8 @@ def report_geometry(points, bbox, frame_shape, threshold):
         for index, point in enumerate(points)
         if len(point) >= 3 and float(point[2]) >= threshold
         and all(math.isfinite(float(value)) for value in point[:3])
+        and 0 <= float(point[0]) < width and 0 <= float(point[1]) < height
+        and (float(point[0]) != 0 or float(point[1]) != 0)
     }
     result = {}
     if 5 in visible and 6 in visible:

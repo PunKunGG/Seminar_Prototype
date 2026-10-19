@@ -78,7 +78,123 @@ test("CSV and Excel use the same qualified results and image filename in each ID
     assert.match(context.capturedExport, /ตั้งใจเรียน \(นาทีรวม\)/);
     assert.match(context.capturedExport, /เวลาที่ผ่านเกณฑ์/);
     assert.doesNotMatch(context.capturedExport, /ข้อมูลย้อนหลัง|ภาพอ้างอิงและพฤติกรรมรายตำแหน่ง/);
+    const original = context.capturedExport;
+    vm.runInContext(`behaviorEventView={includeExcluded:true,trackId:'99',behavior:'sleeping',page:10}; downloadReport("${format}")`, context);
+    assert.equal(context.capturedExport, original);
   }
+});
+
+function portraitPixels(width, height, box) {
+  const pixels = new Uint8ClampedArray(width * height * 4).fill(245);
+  for (let y = box[1]; y < box[3]; y++) {
+    for (let x = box[0]; x < box[2]; x++) {
+      const offset = (y * width + x) * 4;
+      pixels[offset] = 20; pixels[offset + 1] = 40; pixels[offset + 2] = 60;
+    }
+  }
+  return pixels;
+}
+
+test("portrait compatibility rejects excessive generated padding without cropping normal images", () => {
+  const { context } = dashboardContext();
+  for (const [box, expected] of [
+    [[22, 22, 66, 47], true], [[0, 0, 80, 80], false],
+    [[25, 25, 80, 80], false], [[5, 5, 75, 75], false],
+  ]) {
+    context.pixels = portraitPixels(80, 80, box);
+    assert.equal(vm.runInContext("hasExcessivePortraitPadding(pixels,80,80)", context), expected);
+  }
+});
+
+test("padded saved thumbnails fall back once to the original, and canvas errors are harmless", () => {
+  const { context } = dashboardContext();
+  const pixels = portraitPixels(80, 80, [22, 22, 66, 47]);
+  let draws = 0;
+  context.document.createElement = () => ({ getContext: () => ({
+    drawImage() { draws++; }, getImageData: () => ({ data: pixels }),
+  }) });
+  context.image = { src: "http://localhost/portrait.jpg", naturalWidth: 320, naturalHeight: 320 };
+  vm.runInContext("useOriginalForPaddedPortrait(image, 'http://localhost/original.jpg')", context);
+  assert.equal(context.image.src, "http://localhost/original.jpg");
+  vm.runInContext("useOriginalForPaddedPortrait(image, 'http://localhost/original.jpg')", context);
+  assert.equal(draws, 1);
+  context.document.createElement = () => ({ getContext() { throw new Error("Cross-origin canvas"); } });
+  context.image.src = "http://localhost/portrait.jpg";
+  assert.doesNotThrow(() => vm.runInContext("useOriginalForPaddedPortrait(image, 'http://localhost/original.jpg')", context));
+  assert.equal(context.image.src, "http://localhost/portrait.jpg");
+});
+
+test("image viewer opens the original and restores focus after close", () => {
+  const { context, elements } = dashboardContext();
+  const handlers = {};
+  for (const id of ["evidenceDialog", "evidenceCloseButton", "reportTrackingRows"]) {
+    handlers[id] = {};
+    elements[id] = { addEventListener(name, callback) { handlers[id][name] = callback; } };
+  }
+  let focused = 0, opened = 0;
+  const button = { dataset: { evidenceUrl: "http://localhost/original.jpg", evidenceTitle: "ID 1" },
+    isConnected: true, focus() { focused++; } };
+  elements.evidenceDialog.showModal = () => { opened++; };
+  elements.evidenceDialog.close = () => handlers.evidenceDialog.close();
+  elements.evidenceFullImage = { removeAttribute(name) { delete this[name]; } };
+  elements.evidenceDialogTitle = {};
+  vm.runInContext("setupEvidenceViewer()", context);
+  handlers.reportTrackingRows.click({ target: { closest: () => button } });
+  assert.equal(opened, 1);
+  assert.equal(elements.evidenceFullImage.src, button.dataset.evidenceUrl);
+  assert.equal(elements.evidenceDialogTitle.textContent, "ID 1");
+  handlers.evidenceCloseButton.click();
+  assert.equal(focused, 1);
+  assert.equal(elements.evidenceFullImage.src, undefined);
+});
+
+test("PDF waits for the preserved original when a cloned thumbnail has excessive padding", async () => {
+  const { context } = dashboardContext();
+  Object.assign(context, { setTimeout, clearTimeout });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "dashboard", "report-pdf.js"), "utf8"), context);
+  const listeners = {};
+  const originalUrl = "http://localhost/original.jpg";
+  const image = { src: "http://localhost/portrait.jpg", complete: true, naturalWidth: 320, naturalHeight: 320,
+    closest: () => ({ dataset: { evidenceUrl: originalUrl } }),
+    addEventListener(name, listener) { listeners[name] = listener; },
+    removeEventListener(name) { delete listeners[name]; },
+  };
+  context.document.createElement = () => ({ getContext: () => ({
+    drawImage() {}, getImageData: () => ({ data: portraitPixels(80, 80, [22, 22, 66, 47]) }),
+  }) });
+  context.root = { querySelectorAll: () => [image] };
+  let resolved = false;
+  const waiting = vm.runInContext("waitForReportImages(root)", context).then(() => { resolved = true; });
+  await Promise.resolve();
+  assert.equal(image.src, originalUrl);
+  assert.equal(resolved, false);
+  listeners.load();
+  await waiting;
+  assert.equal(resolved, true);
+  assert.deepEqual(Object.keys(listeners), []);
+});
+
+test("PDF preserves image fallbacks and placeholders if a source fails during export", async () => {
+  const { context } = dashboardContext();
+  Object.assign(context, { setTimeout, clearTimeout });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "dashboard", "report-pdf.js"), "utf8"), context);
+  const listeners = {};
+  const button = { dataset: { evidenceUrl: "http://localhost/original.jpg" }, disabled: false };
+  const image = { src: "http://localhost/portrait.jpg", complete: false, hidden: false,
+    closest: () => button,
+    addEventListener(name, listener) { listeners[name] = listener; },
+    removeEventListener(name) { delete listeners[name]; },
+  };
+  context.root = { querySelectorAll: () => [image] };
+  const waiting = vm.runInContext("waitForReportImages(root)", context);
+  listeners.error();
+  assert.equal(image.src, "http://localhost/original.jpg");
+  assert.equal(image.hidden, false);
+  listeners.error();
+  await waiting;
+  assert.equal(image.hidden, true);
+  assert.equal(button.disabled, true);
+  assert.deepEqual(Object.keys(listeners), []);
 });
 
 test("people and attention sort numerically with missing measurements last", () => {
@@ -150,6 +266,10 @@ test("raw excluded events remain inspectable independently of qualified totals",
     qualified_analysis: { summary: { attention_rate: 100 }, events: [events[2]] },
     video_evidence: { available: true, url: "/api/sessions/round/video" } };
   vm.runInContext("latestExportData=fixture; renderBehaviorEvents(reportEvidenceData())", context);
+  assert.equal((elements.reportBehaviorEventRows.innerHTML.match(/data-video-event=/g) || []).length, 1);
+  assert.match(elements.reportBehaviorEventRows.innerHTML, /data-video-event="2"/);
+  assert.doesNotMatch(elements.reportBehaviorEventRows.innerHTML, /ไม่คิดในรายงาน/);
+  vm.runInContext("behaviorEventView.includeExcluded=true; renderBehaviorEvents(reportEvidenceData())", context);
   assert.equal((elements.reportBehaviorEventRows.innerHTML.match(/data-video-event=/g) || []).length, 3);
   assert.match(elements.reportBehaviorEventRows.innerHTML, /ไม่คิดในรายงาน/);
   assert.match(elements.reportBehaviorEventRows.innerHTML, /นับในรายงาน/);
@@ -157,6 +277,91 @@ test("raw excluded events remain inspectable independently of qualified totals",
   assert.equal(vm.runInContext("reportTrackingData().events.length", context), 1);
   assert.equal(vm.runInContext("reportEvidenceData().events[1].track_id", context), 3);
   assert.equal(vm.runInContext("latestExportData.qualified_analysis.summary.attention_rate", context), 100);
+});
+
+test("event pages filter before pagination and preserve raw indexes beyond 300", () => {
+  const { context } = dashboardContext();
+  context.raw = { events: Array.from({ length: 351 }, (_, index) => ({
+    track_id: index < 330 ? 1 : 2, event_index: index + 1,
+    behavior: index % 2 ? "attentive" : "sleeping", duration_seconds: 30,
+  })) };
+  context.qualified = { events: context.raw.events.slice(300) };
+  vm.runInContext("result=behaviorEventPage(raw,qualified)", context);
+  assert.equal(context.result.total, 51);
+  assert.equal(context.result.items.length, 25);
+  assert.equal(context.result.items[0].rawIndex, 300);
+  vm.runInContext("behaviorEventView.page=2; result=behaviorEventPage(raw,qualified)", context);
+  assert.equal(context.result.items[0].rawIndex, 325);
+  vm.runInContext("behaviorEventView.page=3; result=behaviorEventPage(raw,qualified)", context);
+  assert.equal(context.result.items[0].rawIndex, 350);
+  vm.runInContext("behaviorEventView={includeExcluded:true,trackId:'2',behavior:'sleeping',page:99}; result=behaviorEventPage(raw,qualified)", context);
+  assert.equal(context.result.total, 11);
+  assert.equal(context.result.page, 1);
+  assert.equal(context.result.items[0].rawIndex, 330);
+  vm.runInContext("resetBehaviorEventView(); result=behaviorEventPage(raw,null)", context);
+  assert.equal(context.result.total, 351);
+  assert.equal(context.result.items[0].rawIndex, 0);
+});
+
+test("event membership follows server qualification rather than rounded durations", () => {
+  const { context } = dashboardContext();
+  context.raw = { events: [29.9, 30, 30.1, 119.9, 120, 120.1].map((seconds, index) => ({
+    track_id: 1, event_index: index, behavior: index < 3 ? "attentive" : "sleeping",
+    observed_duration_seconds: seconds, duration_seconds: Math.round(seconds),
+  })) };
+  context.qualified = { events: [1, 2, 4, 5].map(index => context.raw.events[index]) };
+  assert.deepEqual(Array.from(vm.runInContext("behaviorEventPage(raw,qualified).items.map(item=>item.rawIndex)", context)), [1, 2, 4, 5]);
+});
+
+test("empty qualified results retain controls and subsecond durations remain clear", () => {
+  const { context, elements } = dashboardContext();
+  let hidden;
+  elements.reportBehaviorEventsSection = { classList: { toggle(name, value) { hidden = value; } } };
+  elements.reportBehaviorEventRows = { innerHTML: "" };
+  elements.reportBehaviorEventsCaption = {};
+  context.fixture = { tracking: { events: [{ track_id: 1, event_index: 1, behavior: "attentive",
+    duration_seconds: 0, observed_duration_seconds: 0.04, observed_segments: [[1,1.04,0.04]] }] }, qualified_analysis: { events: [] } };
+  vm.runInContext("latestExportData=fixture;renderBehaviorEvents(reportEvidenceData())", context);
+  assert.equal(hidden, false);
+  assert.match(elements.reportBehaviorEventRows.innerHTML, /ไม่มีช่วงพฤติกรรมผ่านเกณฑ์/);
+  vm.runInContext("behaviorEventView.includeExcluded=true;renderBehaviorEvents(reportEvidenceData())", context);
+  assert.match(elements.reportBehaviorEventRows.innerHTML, /น้อยกว่า 1 วินาที/);
+  assert.equal(vm.runInContext("formatEventDuration({duration_seconds:0})", context), "0 วินาที");
+});
+
+test("filter controls reset the page without mutating report data", () => {
+  const { context, elements } = dashboardContext();
+  for (const id of ["reportEventsIncludeExcluded", "reportEventsTrack", "reportEventsBehavior", "reportEventsPrevious", "reportEventsNext"]) {
+    elements[id] = { addEventListener(type, callback) { this.callback = callback; } };
+  }
+  vm.runInContext("setupBehaviorEventControls();latestExportData={tracking:{events:[]}};behaviorEventView.page=7", context);
+  elements.reportEventsTrack.callback({ target: { value: "2" } });
+  assert.equal(vm.runInContext("behaviorEventView.page", context), 1);
+  assert.equal(vm.runInContext("behaviorEventView.trackId", context), "2");
+  elements.reportEventsIncludeExcluded.callback({ target: { checked: true } });
+  assert.equal(vm.runInContext("behaviorEventView.includeExcluded", context), true);
+  vm.runInContext("resetBehaviorEventView()", context);
+  assert.equal(vm.runInContext("behaviorEventView.includeExcluded", context), false);
+});
+
+test("context playback clamps padding while keeping observed segments unchanged", () => {
+  const { context } = dashboardContext();
+  const cases = [[{ start: 10, end: 11 }, 30, { start: 7, end: 14 }],
+    [{ start: 1, end: 2 }, 30, { start: 0, end: 5 }],
+    [{ start: 9, end: 12 }, 10, { start: 6, end: 10 }],
+    [{ start: 1, end: 1.04 }, 5, { start: 0, end: 4.04 }]];
+  for (const [segment, duration, expected] of cases) {
+    context.segment = segment;
+    assert.equal(vm.runInContext(`JSON.stringify(evidencePlaybackWindow(segment,${duration},'context'))`, context), JSON.stringify(expected));
+    assert.equal(vm.runInContext(`JSON.stringify(evidencePlaybackWindow(segment,${duration}))`, context), JSON.stringify({ start: segment.start, end: Math.min(segment.end, duration) }));
+    assert.deepEqual(context.segment, segment);
+  }
+  assert.equal(vm.runInContext("evidencePlaybackWindow({start:10,end:11},10,'context')", context), null);
+  assert.equal(vm.runInContext("evidencePlaybackWindow({start:1,end:2},Infinity,'context')", context), null);
+  assert.equal(vm.runInContext("evidenceTime(1.04)", context), "00:01.04");
+  assert.equal(vm.runInContext("evidencePlaybackPhase(0,{start:1,end:2})", context), "บริบทก่อนช่วงตรวจ");
+  assert.equal(vm.runInContext("evidencePlaybackPhase(1,{start:1,end:2})", context), "อยู่ในช่วงที่ตรวจจริง");
+  assert.equal(vm.runInContext("evidencePlaybackPhase(2,{start:1,end:2})", context), "บริบทหลังช่วงตรวจ");
 });
 
 test("new report minimums do not rewrite legacy policy thresholds", () => {
@@ -184,7 +389,7 @@ test("sleeping labels stay non-definitive across reports, evidence and exports",
     qualified_analysis: { summary: { behavior_seconds: { sleeping: 120 } }, tracks: [track], events: [], periods: [] },
     video_evidence: { available: true, url: "/api/sessions/round/video" },
     analysis_methodology: { realtime_summary_interval_seconds: 30, criteria: [{ behavior: "sleeping", label: "หลับ", confirmation_seconds: 8, report_minimum_seconds: 120 }] } };
-  vm.runInContext("latestExportData=fixture; renderTrackingReport(reportTrackingData()); renderBehaviorEvents(reportEvidenceData()); renderAnalysisMethodology(fixture.analysis_methodology)", context);
+  vm.runInContext("latestExportData=fixture; behaviorEventView.includeExcluded=true; renderTrackingReport(reportTrackingData()); renderBehaviorEvents(reportEvidenceData()); renderAnalysisMethodology(fixture.analysis_methodology)", context);
   assert.equal(vm.runInContext("behaviorLabel('sleeping')", context), "ท่าเข้าข่ายหลับ");
   assert.match(elements.reportTrackingHead.innerHTML, /ท่าเข้าข่ายหลับ/);
   assert.match(elements.reportBehaviorEventRows.innerHTML, /ท่าเข้าข่ายหลับ/);

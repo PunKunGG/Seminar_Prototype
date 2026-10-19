@@ -178,7 +178,7 @@ test("failed error cleanup stays actionable until saving is verified, even after
   await f.element("analysisStopConfirm").emit("click");
   assert.match(f.element("analysisStopError").textContent, /ยืนยันการบันทึก/);
   await f.run("refreshAnalysisJobs()");
-  assert.equal(job.status, "error");
+  assert.equal(job.status, "stop_pending");
   assert.equal(f.run("analysisJobBlocksCreation()"), true);
   assert.equal(f.element("analysisStopDialog").open, true);
   f.context.sessions = [{id:"round",status:"cancelled"}];
@@ -198,6 +198,111 @@ test("leaving an errored webcam still supports Stay without stopping the source"
   assert.equal(f.location.hash, "#analysis");
   assert.equal(f.context.document.activeElement, opener);
   assert.ok(!f.calls.some(call => call.method === "DELETE"));
+});
+
+for (const type of ["video", "webcam"]) {
+  for (const failure of ["http", "network", "active", "missing", "invalid_json"]) {
+    test(`${type} stop stays locked after DELETE succeeds but verification is ${failure}`, async () => {
+      const f = fixture(); const job = f.job(type);
+      let verification = failure;
+      f.context.sources = {"round/1": {active:true,source_type:type}};
+      f.run("sessionHistoryState.sessions=[{id:'round',status:'completed'}]");
+      f.context.apiFetch = async (url, options = {}) => {
+        f.calls.push({url,...options});
+        if (options.method === "DELETE") {
+          f.context.sources = {};
+          return {ok:true};
+        }
+        if (url === "/api/sources") return {ok:true,json:async()=>f.context.sources};
+        if (verification === "network") throw Error("Verification offline");
+        if (verification === "invalid_json") return {ok:true,json:async()=>{throw Error("Invalid JSON");}};
+        return {ok:verification !== "http",json:async()=>({sessions:verification === "missing" ? []
+          : [{id:"round",status:verification === "verified" ? (type === "video" ? "cancelled" : "completed") : "active"}]})};
+      };
+      const stopping = f.run("stopCurrentAnalysis()");
+      await f.element("analysisStopConfirm").emit("click");
+      assert.equal(f.element("analysisStopDialog").open, true);
+      await f.run("refreshAnalysisJobs()");
+      assert.equal(job.status, "stop_pending");
+      assert.equal(f.run("analysisJobBlocksCreation()"), true);
+      assert.equal(f.run("activeSources.has('round/1')"), true);
+      f.run("acknowledgeAnalysisReport('round','completed')");
+      assert.notEqual(job.reportViewed, true);
+      assert.match(f.element("analysisJobsList").innerHTML, /data-stop-job="round\/1"/);
+      assert.doesNotMatch(f.element("analysisJobsList").innerHTML, /data-report-job|data-resume-job/);
+
+      f.element("analysisStopDialog").close("stay");
+      await stopping;
+      await f.run("showNewSessionForm()");
+      f.run("startSession()");
+      assert.equal(f.element("newSessionDialog").open, false);
+      assert.equal(f.run("currentLab"), "round");
+      const navigation = f.run("navigateApp('#history')");
+      assert.equal(f.element("analysisStopDialog").open, true);
+      f.element("analysisStopDialog").close();
+      await navigation;
+      assert.equal(f.location.hash, "#analysis");
+      assert.equal(f.run("analysisJobBlocksCreation()"), true);
+
+      verification = "verified";
+      const retry = f.run("stopCurrentAnalysis()");
+      await f.element("analysisStopConfirm").emit("click");
+      await retry;
+      assert.equal(job.status, type === "video" ? "stopped" : "completed");
+      assert.equal(f.run("analysisJobBlocksCreation()"), false);
+      assert.equal(f.run("activeSources.has('round/1')"), false);
+      assert.equal(f.calls.filter(call => call.method === "DELETE").length, 2);
+      assert.ok(!f.calls.some(call => call.method === "POST"));
+    });
+  }
+}
+
+test("stale ended and error source snapshots cannot release an explicit stop lock", async () => {
+  const f = fixture(); const job = f.job();
+  let finishPoll;
+  f.context.apiFetch = async (url) => url === "/api/sources"
+    ? new Promise(resolve => { finishPoll = resolve; })
+    : {ok:true,json:async()=>({sessions:[{id:"round",status:"active"}]})};
+  const poll = f.run("refreshAnalysisJobs()");
+  await assert.rejects(f.run("stopAnalysisJob(analysisJobs.get('round/1'))"), /ยืนยันการบันทึก/);
+  finishPoll({ok:true,json:async()=>({"round/1":{active:false,ended:true,source_type:"video"}})});
+  await poll;
+  assert.equal(job.status, "stop_pending");
+  f.context.apiFetch = async () => ({ok:true,json:async()=>({"round/1":{active:false,error:"Old worker error",source_type:"video"}})});
+  await f.run("refreshAnalysisJobs()");
+  assert.equal(job.status, "stop_pending");
+  assert.equal(f.run("analysisJobBlocksCreation()"), true);
+  assert.ok(!f.calls.some(call => call.report));
+});
+
+test("switching to a different job cannot bypass a pending stop verification", async () => {
+  const f = fixture(); const job = f.job(); job.status = "stop_pending";
+  f.run("registerAnalysisJob({sessionId:'other',camId:1,name:'Other'},{source_type:'video',active:true})");
+  const resume = f.run("resumeAnalysisJob('other/1')");
+  assert.equal(f.element("analysisStopDialog").open, true);
+  f.element("analysisStopDialog").close("stay");
+  await resume;
+  assert.equal(f.run("currentLab"), "round");
+  assert.equal(job.status, "stop_pending");
+  assert.ok(!f.calls.some(call => call.method === "DELETE"));
+});
+
+test("a previous account's late stop verification cannot release the new account's job lock", async () => {
+  const f = fixture(); f.job();
+  let finishVerification;
+  let beginVerification;
+  const verificationStarted = new Promise(resolve => { beginVerification = resolve; });
+  f.context.apiFetch = async (url, options = {}) => options.method === "DELETE" ? {ok:true}
+    : new Promise(resolve => { finishVerification = resolve; beginVerification(); });
+  const stopping = f.run("stopAnalysisJob(analysisJobs.get('round/1'))");
+  await verificationStarted;
+  f.run("appReady=false;clearAnalysisJobs();appReady=true;analysisJobsReady=true;currentLab='new-owner';registerAnalysisJob(analysisSelection(),{source_type:'video',active:true})");
+  finishVerification({ok:true,json:async()=>({sessions:[{id:"round",status:"cancelled"}]})});
+  assert.equal(await stopping, false);
+  assert.equal(f.run("analysisJobs.size"), 1);
+  assert.equal(f.run("analysisJobs.get('new-owner/1').status"), "running");
+  assert.equal(f.run("analysisJobBlocksCreation()"), true);
+  assert.equal(f.run("activeSources.has('new-owner/1')"), true);
 });
 
 test("video navigation leaves capture running and preserves the round", async () => {

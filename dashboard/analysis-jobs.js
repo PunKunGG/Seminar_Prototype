@@ -9,7 +9,7 @@ let analysisStopRequest = null;
 let analysisViewVersion = 0;
 
 function analysisJobNeedsStop(job) {
-  return job?.status === "running" || job?.status === "error";
+  return job?.status === "running" || job?.status === "error" || job?.status === "stop_pending";
 }
 
 function analysisJobBlocksCreation() {
@@ -52,6 +52,7 @@ function registerAnalysisJob(selection, state) {
 function analysisJobStatusText(job) {
   if (analysisJobsUnavailable) return "ตรวจสถานะไม่ได้ กำลังลองเชื่อมต่ออีกครั้ง";
   if (job.stopping) return "กำลังหยุดและบันทึก...";
+  if (job.status === "stop_pending") return "ยังยืนยันการหยุดและบันทึกไม่ได้ กรุณาลองอีกครั้ง";
   if (job.status === "completed") return "วิเคราะห์เสร็จแล้ว";
   if (job.status === "stopped") return "หยุดก่อนจบคลิป เก็บผลเท่าที่ตรวจได้";
   if (job.status === "interrupted") return "ไม่พบงานที่กำลังทำบนเซิร์ฟเวอร์ ดูผลที่บันทึกไว้ได้";
@@ -120,7 +121,7 @@ function renderAnalysisJobs() {
       <div class="analysis-job-actions">${job.status === "running"
         ? `<button type="button" data-resume-job="${escapeHtml(job.key)}" class="job-primary">กลับไปหน้าวิเคราะห์</button>` : ""}
         ${analysisJobNeedsStop(job)
-        ? `<button type="button" data-stop-job="${escapeHtml(job.key)}" class="job-stop" ${job.stopping ? "disabled" : ""}>หยุด${job.status === "error" || job.sourceType === "webcam" ? "และบันทึก" : "วิเคราะห์"}</button>`
+        ? `<button type="button" data-stop-job="${escapeHtml(job.key)}" class="job-stop" ${job.stopping ? "disabled" : ""}>${job.status === "stop_pending" ? "หยุดและบันทึกอีกครั้ง" : `หยุด${job.status === "error" || job.sourceType === "webcam" ? "และบันทึก" : "วิเคราะห์"}`}</button>`
         : `<button type="button" data-report-job="${escapeHtml(job.key)}" class="job-primary">ดูรายงาน</button>`}</div>
     </div>`).join("");
   if (sourceOperation) html += `<div class="analysis-job-row"><div class="min-w-0"><p class="font-semibold break-words">${escapeHtml(sourceOperation.name)}</p><p class="text-sm text-gray-600">${sourceOperation.kind === "upload" ? "กำลังอัปโหลดคลิป..." : "กำลังเริ่มแหล่งภาพ..."}</p></div></div>`;
@@ -180,7 +181,7 @@ async function resumeAnalysisJob(key) {
   const job = analysisJobs.get(key);
   if (!job || job.status !== "running") return;
   const current = analysisJobs.get(_srcKey(currentLab, currentCamera));
-  if (current?.key !== key && current?.sourceType === "webcam" && analysisJobNeedsStop(current)
+  if (current?.key !== key && (current?.sourceType === "webcam" || current?.status === "stop_pending") && analysisJobNeedsStop(current)
     && !await requestAnalysisStop(current)) return;
   if (!appReady || !analysisJobs.has(key) || job.status !== "running") return;
   suspendAnalysisView();
@@ -243,8 +244,13 @@ async function refreshAnalysisJobs() {
           sourceLabel: metadata.source_label || job.sourceLabel });
         if (!analysisJobNeedsStop(job) || job.stopping) continue;
         const state = sources[job.key];
+        // A source snapshot cannot verify persistence after an explicit stop attempt.
+        if (job.status === "stop_pending") {
+          if (state) job.state = state;
+          continue;
+        }
         if (!state) {
-          if (knownKeys.has(job.key) && job.status !== "error") { job.status = "interrupted"; activeSources.delete(job.key); }
+          if (knownKeys.has(job.key) && job.status === "running") { job.status = "interrupted"; activeSources.delete(job.key); }
           continue;
         }
         job.state = state;
@@ -316,7 +322,10 @@ function clearAnalysisJobs() {
 
 async function stopAnalysisJob(job) {
   const epoch = analysisJobsEpoch;
+  job.status = "stop_pending";
   job.stopping = true;
+  activeSources.add(job.key);
+  if (appView === "analysis" && currentLab === job.sessionId && currentCamera === job.camId) suspendAnalysisView();
   renderAnalysisJobs();
   try {
     const response = await apiFetch(`/api/sources/${encodeURIComponent(job.sessionId)}/${job.camId}`, { method: "DELETE" });
@@ -345,9 +354,12 @@ function requestAnalysisStop(job) {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
   analysisStopRequest = { key: job.key, job, promise, resolve, opener, openerAction: jobActionReference(opener), epoch: analysisJobsEpoch, busy: false };
-  setTextIfPresent("analysisStopTitle", job.status === "error" ? "หยุดแหล่งภาพที่มีปัญหาหรือไม่"
+  setTextIfPresent("analysisStopTitle", job.status === "stop_pending" ? "ลองหยุดและบันทึกรอบอีกครั้งหรือไม่"
+    : job.status === "error" ? "หยุดแหล่งภาพที่มีปัญหาหรือไม่"
     : job.sourceType === "webcam" ? "หยุดเว็บแคมก่อนออกหรือไม่" : "หยุดวิเคราะห์ก่อนจบคลิปหรือไม่");
-  setTextIfPresent("analysisStopDescription", job.status === "error"
+  setTextIfPresent("analysisStopDescription", job.status === "stop_pending"
+    ? "ยังยืนยันผลการบันทึกไม่ได้ ระบบจะลองหยุดและตรวจสถานะรอบอีกครั้งก่อนปลดล็อก"
+    : job.status === "error"
     ? "ระบบจะปิดแหล่งภาพที่มีปัญหาและบันทึกผลเท่าที่ตรวจได้ก่อนปิดรอบนี้"
     : job.sourceType === "webcam"
     ? "หยุดกล้องและบันทึกผลรอบนี้ก่อนออกจากหน้าวิเคราะห์"
@@ -364,8 +376,8 @@ function requestAnalysisStop(job) {
 async function confirmAnalysisNavigation(hash) {
   if (appView !== "analysis" || hash === "#analysis") return true;
   if (sourceOperation?.sourceType === "webcam") { showToast("กำลังเริ่มเว็บแคม กรุณารอสักครู่", "warning"); return false; }
-  const webcam = analysisJobs.get(_srcKey(currentLab, currentCamera));
-  return webcam?.sourceType === "webcam" && analysisJobNeedsStop(webcam) ? requestAnalysisStop(webcam) : true;
+  const job = analysisJobs.get(_srcKey(currentLab, currentCamera));
+  return (job?.sourceType === "webcam" || job?.status === "stop_pending") && analysisJobNeedsStop(job) ? requestAnalysisStop(job) : true;
 }
 
 async function stopCurrentAnalysis() {

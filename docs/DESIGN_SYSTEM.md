@@ -34,4 +34,6 @@ Remove a completed/partial job notice after its final report loads successfully,
 
 Webcam departure and explicit video stop use a labelled native dialog. Focus Stay initially; Escape/Stay cancel without DELETE and restore the opener. Disable repeat confirmation and dismissal during saving. Keep failures in the dialog and do not navigate until terminal saving is verified. New-round creation is visibly disabled while jobs or source operations are active, or discovery is unavailable.
 
+After a failed stop/save verification, retain a pending-verification status and a retry action in the history band and analysis controls. Escape/Stay dismisses only the dialog, not the pending lock. Leaving that analysis asks again, for video as well as webcam, until terminal saving is verified; ordinary running-video navigation is unchanged.
+
 For a bound video, show the clip name and recording start as read-only labelled details in place of the upload form. Restore these details on return or refresh, using the browser's local time for the saved timestamp. Stack details on mobile and allow long filenames to wrap. Source setup remains editable only for an unbound round; restoring the selected mode must not show the warning reserved for an actual source change.
